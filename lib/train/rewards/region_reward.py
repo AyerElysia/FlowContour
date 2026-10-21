@@ -1,4 +1,4 @@
-"""Non-differentiable contour rewards used by supervised evaluation and GRPO."""
+"""Non-differentiable contour rewards used by supervised evaluation and GDPO."""
 
 import cv2
 import numpy as np
@@ -186,7 +186,7 @@ def compute_delta_nsd_reward(
     sampled_burr: torch.Tensor,
     burr_weight: float = 0.06,
 ) -> torch.Tensor:
-    """Return the released five-stage Fourier GRPO reward.
+    """Return the released five-stage Fourier GDPO reward.
 
     The deterministic term is a same-stage, same-latent counterfactual.  The
     burr regularizer is absolute on the sampled endpoint; it is deliberately

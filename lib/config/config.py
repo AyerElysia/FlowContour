@@ -3,7 +3,7 @@
 The two human-readable YAML files are the source of truth:
 
 * configs/stage1.yaml for supervised MoonViT-replacer + Flow training;
-* configs/stage2_rl.yaml for five-action Fourier delta-NSD GRPO.
+* configs/stage2_rl.yaml for five-action Fourier delta-NSD GDPO.
 
 This module contains only runtime defaults needed before a YAML file is
 merged. The local CfgNode implementation accepts keys declared by those YAML
@@ -46,7 +46,8 @@ cfg.gt_detection_class_offset = 1
 cfg.use_diffusion_evolution = True
 cfg.use_flow_matching = True
 cfg.use_diffusion_trainer = True
-cfg.use_grpo = False
+cfg.use_gdpo = False
+cfg.use_grpo = False  # Backward-compatible alias for GDPO
 
 # Fixed contour and data geometry.
 cfg.down_ratio = 4

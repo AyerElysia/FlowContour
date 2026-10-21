@@ -31,6 +31,7 @@ class MainlineConfigTest(unittest.TestCase):
             paths,
             {
                 "lib/networks/diffusion/__init__.py",
+                "lib/networks/diffusion/cr_moe.py",
                 "lib/networks/diffusion/flow_matching_evolution.py",
                 "lib/networks/diffusion/ha_smoe.py",
                 "lib/networks/diffusion/mainline_denoiser.py",

@@ -1,9 +1,9 @@
-"""Flow-matching contour evolution for the released DiffusionSnake mainline.
+"""Flow-matching contour evolution for the released FlowContour mainline.
 
 There is deliberately one implementation in this package:
 
 * Route-B bbox-octagon initialization;
-* a six-layer Flow denoiser with one contour-level HA-SMoE route path;
+* a six-layer Flow denoiser with one contour-level CR-MoE route path;
 * continuous residual-progress sampling for supervised training;
 * Adams--Bashforth-2 with four evaluations per outer stage; and
 * a fixed two-stage deployment schedule.
@@ -171,7 +171,7 @@ class FlowMatchingEvolution(nn.Module):
 
         print(
             "[FlowMatchingEvolution] mainline "
-            "layers=6 dim=256 HA-SMoE=blocks2/4/6,E4K2 "
+            "layers=6 dim=256 CR-MoE=blocks2/4/6,E4K2 "
             "output=dense deployment=2x4-AB2",
             flush=True,
         )

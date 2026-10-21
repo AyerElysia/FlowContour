@@ -1,19 +1,19 @@
-# Official five-action RL stage for the MoonViT+Flow VerSe mainline.
+# Official five-action GDPO stage for the MoonViT+Flow VerSe mainline.
 # The offline MoonViT layer-18 encoder and learned feature replacer are frozen;
 # only the inherited Flow is optimized. RL uses the released five-stage
 # full-extrap trajectory, while every reported evaluation remains the deployed
 # two-outer-stage AB2 trajectory (2 x 4 = 8 NFE).
-model: 'moonvit_flow_ha_smoe_stage2_rl'
+model: 'moonvit_flow_cr_moe_stage2_rl'
 task: 'snake'
 model_dir: 'data/outputs/stage2_rl'
 gpus: [0]
 resume: false
 resume_weights_only: true
-resume_path: 'artifacts/checkpoints/ha_smoe_stage1_best.pt'
+resume_path: 'artifacts/checkpoints/cr_moe_stage1_best.pt'
 resume_allow_partial_copy: false
 resume_exclude_prefixes: []
 resume_allowed_missing_prefixes: []
-resume_source_format: 'strict_ha_smoe_supervised_checkpoint'
+resume_source_format: 'strict_cr_moe_supervised_checkpoint'
 train_or_test: train
 
 pure2d_memory_free_required: true
@@ -108,6 +108,7 @@ iterative_ode_steps: 4
 flow_ode_solver: 'ab2'
 infer_noise_scale: 1.0
 infer_avg_samples: 1
+use_gdpo: true
 use_grpo: true
 anatomical_class_count: 26
 use_diffusion_trainer: true

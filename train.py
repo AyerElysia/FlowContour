@@ -536,7 +536,7 @@ def main():
     optimizer = make_optimizer(cfg, trainer.network)
 
     if is_main_process:
-        logger.info(f"use_grpo={getattr(cfg, 'use_grpo', None)}")
+        logger.info(f"use_gdpo={getattr(cfg, 'use_gdpo', getattr(cfg, 'use_grpo', None))}")
 
     data_loader = make_data_loader(
         cfg, is_train=True, is_distributed=is_distributed

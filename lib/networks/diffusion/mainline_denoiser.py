@@ -1,4 +1,4 @@
-"""Checkpoint-compatible Flow + HA-SMoE denoiser used by the mainline.
+"""Checkpoint-compatible Flow + CR-MoE denoiser used by the mainline.
 
 This module is the single supported denoiser implementation.  It preserves
 the parameter names and computations of the signed source configuration:
@@ -331,16 +331,16 @@ class MainlineDiTBlock(nn.Module):
         ffn_output = self.mlp(ffn_input)
         if self.routed_moe is not None:
             if route_logits is None:
-                raise RuntimeError("HA-SMoE route logits are required")
+                raise RuntimeError("CR-MoE route logits are required")
             ffn_output = ffn_output + self.routed_moe(ffn_input, route_logits)
         elif route_logits is not None:
             raise RuntimeError("route logits supplied to a dense DiT block")
         return x + gate_ff.unsqueeze(1) * ffn_output
 
-    def enable_ha_smoe(self) -> None:
+    def enable_cr_moe(self) -> None:
         if self.routed_moe is not None:
             raise RuntimeError("this DiT block already has routed experts")
-        from .ha_smoe import ContourSharedResidualExperts
+        from .cr_moe import ContourSharedResidualExperts
 
         self.routed_moe = ContourSharedResidualExperts(
             dim=self.dim,
@@ -351,6 +351,8 @@ class MainlineDiTBlock(nn.Module):
             specialization_weight=5e-3,
             expert_init_std=1e-4,
         )
+
+    enable_ha_smoe = enable_cr_moe
 
     def reg_loss(self) -> torch.Tensor:
         if self.routed_moe is None:
@@ -403,7 +405,7 @@ class DenseResidualFinalHead(nn.Module):
 
 
 class MainlineFlowDenoiser(nn.Module):
-    """Six-layer Flow denoiser with the single released HA-SMoE design."""
+    """Six-layer Flow denoiser with the single released CR-MoE design."""
 
     def __init__(
         self,
@@ -422,7 +424,7 @@ class MainlineFlowDenoiser(nn.Module):
         self.time_dim = self.state_dim
         self.num_points = int(num_points)
         if int(num_layers) != 6:
-            raise ValueError("HA-SMoE mainline requires exactly six DiT blocks")
+            raise ValueError("CR-MoE mainline requires exactly six DiT blocks")
 
         self.time_emb_net = nn.Sequential(
             SinusoidalTimeEmbedding(dim=self.state_dim // 4),
@@ -455,19 +457,20 @@ class MainlineFlowDenoiser(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        from .ha_smoe import ContourRoutePath
+        from .cr_moe import ContourRoutePath
 
         # Human block numbers 2/4/6 map to zero-based Python indices 1/3/5.
-        self._ha_smoe_layer_indices = (1, 3, 5)
+        self._cr_moe_layer_indices = (1, 3, 5)
+        self._ha_smoe_layer_indices = self._cr_moe_layer_indices
         self._contour_moe_router = ContourRoutePath(
             dim=self.state_dim,
-            num_routed_blocks=len(self._ha_smoe_layer_indices),
+            num_routed_blocks=len(self._cr_moe_layer_indices),
             num_experts=4,
             hidden_dim=256,
             temperature=1.0,
         )
-        for index in self._ha_smoe_layer_indices:
-            self.dit_layers[index].enable_ha_smoe()
+        for index in self._cr_moe_layer_indices:
+            self.dit_layers[index].enable_cr_moe()
 
         if not use_s_conditioning:
             raise ValueError("the mainline requires diffusion-stage conditioning")
@@ -551,7 +554,7 @@ class MainlineFlowDenoiser(nn.Module):
         route_path = self._contour_moe_router(local_context)
         route_positions = {
             layer_index: route_index
-            for route_index, layer_index in enumerate(self._ha_smoe_layer_indices)
+            for route_index, layer_index in enumerate(self._cr_moe_layer_indices)
         }
         for index, layer in enumerate(self.dit_layers):
             context = global_context if index % 2 == 0 else local_context
@@ -573,10 +576,13 @@ class MainlineFlowDenoiser(nn.Module):
             regularization = regularization + layer.reg_loss()
         return prediction, regularization
 
-    def moe_diagnostics(self) -> dict[str, torch.Tensor]:
-        from .ha_smoe import collect_ha_smoe_diagnostics
+    def cr_moe_diagnostics(self) -> dict[str, torch.Tensor]:
+        from .cr_moe import collect_cr_moe_diagnostics
 
-        return collect_ha_smoe_diagnostics(self)
+        return collect_cr_moe_diagnostics(self)
+
+    moe_diagnostics = cr_moe_diagnostics
+    ha_smoe_diagnostics = cr_moe_diagnostics
 
 
 __all__ = (

@@ -1,4 +1,5 @@
-# FlowSnake：VerSe MoonViT + HA-SMoE Flow 双阶段主线
+# FlowContour：VerSe MoonViT + HA-SMoE Flow 双阶段主线
+
 
 本仓库只保留一条可复现的正式路线：
 
@@ -29,7 +30,7 @@
 
 GT box + GT anatomical class
   └─ Route-B：矩形 → 12 点八边形 → 128 点初始轮廓
-       └─ 13.688M Local-statistics HA-SMoE Flow
+       └─ 13.688M Local-statistics CR-MoE Flow
             ├─ 一次轮廓级路由：[N, 3 blocks, 4 experts]
             ├─ DiT blocks 2/4/6：共享 Dense FFN + E4 Top-2 残差专家
             ├─ 单一 Dense 速度头
@@ -44,7 +45,7 @@ GT box + GT anatomical class
 |---|---:|---|---|
 | 继承的共享 Flow | 11,127,108 | 训练 | 训练 |
 | HA-SMoE local router + 三组专家 | 2,560,524 | 训练 | 训练 |
-| Local-statistics HA-SMoE Flow | 13,687,632 | 训练 | 训练 |
+| Local-statistics CR-MoE Flow | 13,687,632 | 训练 | 训练 |
 | MoonViT 特征替换器 | 3,246,336 | 训练 | 冻结 |
 | MoonViT 编码器 | 不进入训练图 | 冻结缓存 | 冻结缓存 |
 | 总模型 | 16,933,968 | 16,933,968 可训练 | 13,687,632 可训练 |
@@ -113,7 +114,7 @@ DATA_ROOT=/path/to/sagittal_2d_fixed
 SLICE_MANIFEST="$DATA_ROOT/manifests/slice_manifest.csv"
 MOONVIT_CACHE=/path/to/sagittal_moonvit_cache
 STAGE1_SOURCE=/path/to/pure2d_moonvit_dense_step19000.pt
-STAGE2_SOURCE=/path/to/ha_smoe_stage1_selected.pt
+STAGE2_SOURCE=/path/to/cr_moe_stage1_selected.pt
 STAGE2_SOURCE_SHA256=<64位完整SHA256>
 STAGE2_SOURCE_STEP=<checkpoint中的step>
 CASE_METADATA=/path/to/case_metadata.csv

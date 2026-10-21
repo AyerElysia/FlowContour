@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flow-only GRPO for the official five-action Fourier mainline.
+"""Flow-only GDPO for the official five-action Fourier mainline.
 
 Training uses five residual outer stages (20/40/60/80/100 percent cumulative
 progress). Each stage owns one low-frequency Fourier normal-field action.
@@ -54,7 +54,7 @@ from lib.rl import (
     stage_progress,
     standard_normal_logprob,
 )
-from lib.train.grpo_v2_utils import EMA, freeze_bn_running_stats, percentiles
+from lib.train.gdpo_utils import EMA, freeze_bn_running_stats, percentiles
 from lib.train.rewards.region_reward import (
     compute_delta_nsd_reward,
     compute_nsd_score,
@@ -300,6 +300,7 @@ def main() -> None:
     cfg.use_diffusion_evolution = True
     cfg.use_diffusion_trainer = True
     cfg.use_flow_matching = True
+    cfg.use_gdpo = True
     cfg.use_grpo = True
 
     train_steps = int(_cfg_value("train_steps", 10_000))
@@ -393,7 +394,7 @@ def main() -> None:
     _require_exact(contract, expected_contract, "RL scientific contract")
     _require_exact(int(_cfg_value("outer_steps", 5)), 5, "training outer stages")
     _require_exact(int(_cfg_value("deployment_outer_steps", 2)), 2, "deployment stages")
-    _require_exact(k_rollouts, 8, "GRPO rollout count")
+    _require_exact(k_rollouts, 8, "GDPO rollout count")
     _require_exact(ppo_epochs, 2, "PPO epochs")
     _require_exact(round(ppo_clip, 6), 0.05, "PPO clip")
     _require_exact(round(ppo_kl_target, 6), 0.002, "approx-KL stop")
@@ -608,7 +609,7 @@ def main() -> None:
             "trainable_flow": EXPECTED_FLOW_PARAMETERS,
             "frozen_context": EXPECTED_CONTEXT_PARAMETERS,
         },
-        "ha_smoe": {
+        "cr_moe": {
             "routing_unit": "whole_contour",
             "routed_blocks": [2, 4, 6],
             "num_experts": 4,
@@ -825,7 +826,7 @@ def main() -> None:
                 "source_checkpoint_sha256": EXPECTED_SOURCE_SHA256,
                 "time": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "experiment_metadata": {
-                    "pipeline": "five_action_fourier_grpo_2x4_deploy",
+                    "pipeline": "five_action_fourier_gdpo_2x4_deploy",
                     "train_fractions": list(fractions),
                     "train_progress": list(train_progress),
                     "deployment_fractions": list(deployment_fractions),

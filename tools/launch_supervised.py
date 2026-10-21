@@ -24,7 +24,7 @@ EXPECTED_MODEL_PARAMETERS = 16_933_968
 EXPECTED_TRAINABLE_PARAMETERS = 16_933_968
 EXPECTED_FLOW_TRAINABLE_PARAMETERS = 13_687_632
 EXPECTED_REPLACER_TRAINABLE_PARAMETERS = 3_246_336
-EXPECTED_HA_SMOE_MISSING_PREFIXES = [
+EXPECTED_CR_MOE_MISSING_PREFIXES = [
     "net.gcn.denoiser._contour_moe_router.",
     "net.gcn.denoiser.dit_layers.1.routed_moe.",
     "net.gcn.denoiser.dit_layers.3.routed_moe.",
@@ -127,7 +127,7 @@ def compare_preflight_states(source_path: Path, final_path: Path, audit_path: Pa
     disallowed_added = [
         name
         for name in added
-        if not any(name.startswith(prefix) for prefix in EXPECTED_HA_SMOE_MISSING_PREFIXES)
+        if not any(name.startswith(prefix) for prefix in EXPECTED_CR_MOE_MISSING_PREFIXES)
     ]
     shape_mismatches = []
     stats = {
@@ -183,7 +183,7 @@ def compare_preflight_states(source_path: Path, final_path: Path, audit_path: Pa
         and all(group["all_final_finite"] for group in stats.values())
     )
     audit = {
-        "schema": "diffusionsnake.ha_smoe_supervised_preflight_audit.v1",
+        "schema": "flowcontour.cr_moe_supervised_preflight_audit.v1",
         "status": "PASS" if passed else "FAIL",
         "source_checkpoint": str(source_path),
         "final_checkpoint": str(final_path),
@@ -191,9 +191,9 @@ def compare_preflight_states(source_path: Path, final_path: Path, audit_path: Pa
         "final_state_key": final_key,
         "final_step": final_step,
         "missing_tensors": missing,
-        "new_ha_smoe_tensors": added,
+        "new_cr_moe_tensors": added,
         "disallowed_new_tensors": disallowed_added,
-        "all_new_ha_smoe_tensors_finite": added_finite,
+        "all_new_cr_moe_tensors_finite": added_finite,
         "shape_mismatches": shape_mismatches,
         "groups": stats,
         "interpretation": {
@@ -286,7 +286,7 @@ def main():
     assert_equal(bool(cfg.resume_allow_partial_copy), False, "partial-copy policy")
     assert_equal(
         [str(value) for value in cfg.resume_allowed_missing_prefixes],
-        EXPECTED_HA_SMOE_MISSING_PREFIXES,
+        EXPECTED_CR_MOE_MISSING_PREFIXES,
         "dense-to-HA-SMoE migration prefixes",
     )
     assert_equal(str(cfg.detector_backend), "flow_box_only", "detector backend")
@@ -372,7 +372,7 @@ def main():
 
     output_root.mkdir(parents=True, exist_ok=False)
     manifest = {
-        "schema": "flowsnake.ha_smoe_stage1_from_moonvit_step19000.v1",
+        "schema": "flowcontour.cr_moe_stage1_from_moonvit_step19000.v1",
         "status": "STARTED",
         "mode": args.mode,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -421,11 +421,11 @@ def main():
         "frozen_modules": ["offline_moonvit_encoder"],
         "trainable_modules": [
             "shared_flow",
-            "ha_smoe_contour_router",
-            "ha_smoe_routed_experts",
+            "cr_moe_contour_router",
+            "cr_moe_routed_experts",
             "moonvit_layer18_feature_replacer",
         ],
-        "optimizer_transition": "fresh_adamw_dense_to_ha_smoe_weights_only_migration",
+        "optimizer_transition": "fresh_adamw_dense_to_cr_moe_weights_only_migration",
         "loss_role": "health_monitoring_only_no_plateau_early_stop",
     }
     manifest_path = output_root / "PURE2D_TRAINING_LAUNCH.json"
@@ -459,3 +459,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+EXPECTED_HA_SMOE_MISSING_PREFIXES = EXPECTED_CR_MOE_MISSING_PREFIXES

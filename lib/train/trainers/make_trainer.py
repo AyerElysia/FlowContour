@@ -13,8 +13,8 @@ def _wrapper_factory(cfg, network):
     """Wrap a mainline network with its supervised Flow objective."""
     if not bool(getattr(cfg, "use_diffusion_trainer", False)):
         raise ValueError("the mainline package requires use_diffusion_trainer=true")
-    if bool(getattr(cfg, "use_grpo", False)):
-        raise ValueError("GRPO uses the dedicated RL entry point")
+    if bool(getattr(cfg, "use_gdpo", False)) or bool(getattr(cfg, "use_grpo", False)):
+        raise ValueError("GDPO uses the dedicated RL entry point")
     return DiffusionPretrainNetworkWrapper(network)
 
 

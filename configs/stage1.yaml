@@ -1,8 +1,8 @@
 # Stage 1: migrate the signed dense MoonViT+Flow source into the only released
-# HA-SMoE architecture, then jointly train the replacer and complete Flow.
+# CR-MoE architecture, then jointly train the replacer and complete Flow.
 # The signed source is the highest complete checkpoint from the canonical
 # MoonViT-cache dense run: local step19000 (absolute-equivalent step59000).
-model: 'moonvit_flow_ha_smoe_stage1'
+model: 'moonvit_flow_cr_moe_stage1'
 task: 'snake'
 model_dir: 'data/outputs/stage1'
 gpus: [6]
@@ -100,13 +100,14 @@ diffusion_disp_stats: 'data/stats/volmem_sagittal_disp_stats.json'
 dit_num_layers: 6
 dit_num_heads: 8
 dit_state_dim: 256
-# HA-SMoE is architectural: one local-statistics contour router emits E4 Top-2
+# CR-MoE is architectural: one local-statistics contour router emits E4 Top-2
 # routes for DiT blocks 2/4/6; the shared FFNs and dense velocity head remain.
 iterative_fractions: [0.6667, 1.0]
 iterative_ode_steps: 4
 flow_ode_solver: 'ab2'
 infer_noise_scale: 1.0
 infer_avg_samples: 1
+use_gdpo: false
 use_grpo: false
 anatomical_class_count: 26
 use_diffusion_trainer: true

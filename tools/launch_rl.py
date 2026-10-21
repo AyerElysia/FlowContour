@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed launcher for five-action Fourier GRPO and 2x4 deployment."""
+"""Fail-closed launcher for five-action Fourier GDPO and 2x4 deployment."""
 
 from __future__ import annotations
 
@@ -26,7 +26,9 @@ TRAINER = REPO / 'tools/train_rl.py'
 CONFIG = REPO / 'configs/stage2_rl.yaml'
 SUPERVISED_CONFIG = REPO / 'configs/stage1.yaml'
 REWARD_MODULE = REPO / 'lib/train/rewards/region_reward.py'
-SOURCE = REPO / 'artifacts/checkpoints/ha_smoe_stage1_best.pt'
+SOURCE = REPO / 'artifacts/checkpoints/cr_moe_stage1_best.pt'
+if not SOURCE.exists() and (REPO / 'artifacts/checkpoints/ha_smoe_stage1_best.pt').exists():
+    SOURCE = REPO / 'artifacts/checkpoints/ha_smoe_stage1_best.pt'
 TUNE_MANIFEST = REPO / 'configs/manifests/volmem_fourier_validation37.csv'
 PREFLIGHT = REPO / 'data/outputs/stage2_rl_preflight'
 FORMAL = REPO / 'data/outputs/stage2_rl'
@@ -253,7 +255,7 @@ def main() -> int:
     parser.add_argument(
         '--source-sha256',
         required=True,
-        help='full SHA256 of the selected supervised HA-SMoE checkpoint',
+        help='full SHA256 of the selected supervised CR-MoE checkpoint',
     )
     parser.add_argument(
         '--source-step',
@@ -336,7 +338,7 @@ def main() -> int:
     manifest = {
         'status': 'STARTED',
         'mode': args.mode,
-        'pipeline': 'moonvit_ha_smoe_five_action_fourier_delta_nsd_grpo_2x4_deploy',
+        'pipeline': 'moonvit_cr_moe_five_action_fourier_delta_nsd_gdpo_2x4_deploy',
         'output': str(output),
         'gpu': args.gpu,
         'launcher_pid': os.getpid(),
@@ -355,7 +357,7 @@ def main() -> int:
         'model_parameters': EXPECTED_MODEL_PARAMETERS,
         'flow_trainable_parameters': EXPECTED_FLOW_PARAMETERS,
         'frozen_context_parameters': EXPECTED_CONTEXT_PARAMETERS,
-        'ha_smoe': {
+        'cr_moe': {
             'routing_unit': 'whole_contour',
             'routed_blocks': [2, 4, 6],
             'num_experts': 4,

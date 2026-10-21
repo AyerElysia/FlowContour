@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         "--expected-step",
         type=int,
         required=True,
-        help="exact step stored in the selected HA-SMoE checkpoint",
+        help="exact step stored in the selected CR-MoE checkpoint",
     )
     parser.add_argument("--max-scan", type=int, default=64)
     return parser.parse_args()

@@ -456,6 +456,7 @@ def main(argv=None):
     from lib.utils.snake import snake_config
     from lib.utils.snake.snake_voc_utils import get_octagon, get_quadrangle
 
+    cfg.use_gdpo = False
     cfg.use_grpo = False
     cfg.use_gt_det = True
     cfg.use_gt_det_train_only = False
@@ -688,7 +689,7 @@ def main(argv=None):
             "feature_output_resolution": [128, 128],
             "loaded_tensor_count": loaded_tensor_count,
             "strict_checkpoint_load": True,
-            "ha_smoe": {
+            "cr_moe": {
                 "routing_unit": "whole_contour",
                 "routed_blocks": [2, 4, 6],
                 "experts": 4,
