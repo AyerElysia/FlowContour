@@ -1,491 +1,265 @@
-# FlowContour：VerSe MoonViT + HA-SMoE Flow 双阶段主线
+# FlowContour：基于 MoonViT 与 CR-MoE 的分布化医学轮廓演化
 
+FlowContour 将整条闭合轮廓的联合位移视为条件动作，以 Flow Matching 学习动作分布。CR-MoE（Contour-Routed Mixture-of-Experts）提供轮廓级条件化适配；后训练分为在线模仿微调与 GDPO 几何探索强化学习。
 
-本仓库只保留一条可复现的正式路线：
-
-> **离线 MoonViT layer-18 特征 → 轮廓级 HA-SMoE Flow 监督训练 → 冻结特征替换器、只对完整 Flow 做五阶段傅里叶 full-extrap GRPO → 固定 2×4 AB2（8 NFE）推理。**
-
-这是一份可直接交接的运行手册。权重、数据集和约 84 GB 的 MoonViT 缓存不进入 Git；代码通过路径参数使用它们。
-
-## 1. 科学口径
-
-- 当前发布主线是**逐张矢状位切片的纯 2D 模型**。正式配置不使用 Memory、相邻帧特征、3D 卷积、3D Transformer、SAM 或内部检测器。
-- MoonViT 是唯一推荐的视觉特征来源。编码器不在训练图中，只读取提前生成并带元数据的 `layer_18` 缓存。
-- 训练与评估使用 GT bounding box 和 GT anatomical class，属于 `oracle_prompt` 口径。检测器框或预测类别必须另表报告。
-- Stage 1 同时训练 Flow 和 MoonViT 特征替换器；Stage 2 只训练继承的 Flow。
-- HA-SMoE 只有一种实现：一次轮廓级路由为 DiT 第 2/4/6 层分别产生 E4 Top-2 路由；原 Dense FFN 始终执行，专家只提供残差；速度输出头保持 Dense。
-- 整条 128 点轮廓共享每一层的专家选择。仓库没有点级/token 级路由、独立逐层 router、全层 MoE 或输出头 MoE/GMM。
-- Stage 2 的五阶段轨迹只是一种训练课程。所有可报告评估和部署始终使用两外阶段、每阶段 4 次 AB2 函数求值，共 8 NFE。
-- 数据管线只读取中心切片和该切片的 `layer_18` 缓存；仓库不再包含相邻切片或上一切片轮廓初始化分支。
-- Train72、Val37、Dev8 互相分工；`sub-verse010/011/013` 永远禁止访问。
-
-## 2. 从输入到输出
+目标主线为：
 
 ```text
-中心矢状位切片
-  └─ 离线 MoonViT：448×448，patch 14，layer 18
-       └─ float16 特征 [1152, Htoken, Wtoken]
-            └─ 3.246M 特征替换器（Conv + PixelShuffle×2）
-                 └─ 仿射映射到 128×128 轮廓特征网格
-
-GT box + GT anatomical class
-  └─ Route-B：矩形 → 12 点八边形 → 128 点初始轮廓
-       └─ 13.688M Local-statistics CR-MoE Flow
-            ├─ 一次轮廓级路由：[N, 3 blocks, 4 experts]
-            ├─ DiT blocks 2/4/6：共享 Dense FFN + E4 Top-2 残差专家
-            ├─ 单一 Dense 速度头
-            ├─ 外阶段 1：fraction=0.6667，s=0.0，AB2×4
-            └─ 外阶段 2：fraction=1.0，s=0.6667，AB2×4
-                 └─ 最终 128 点轮廓（总计 8 NFE）
+离线 MoonViT layer-18 特征 + GT box / anatomical class
+    ↓
+混合状态预训练：初始、连续中间、GT 附近扰动精修
+    ↓
+后训练一：在模型自身产生的轮廓上进行在线模仿微调
+    ↓
+后训练二：GDPO 几何探索，最终奖励与阶段信用分配
+    ↓
+两步完整位移推理：每步重新取特征、4 次 AB2 求值，共 8 NFE
 ```
 
-第二外阶段会在第一阶段更新后的轮廓位置重新采样特征。AB2 的 4 次速度预测是数值求解，不是 4 个 RL 动作。
+## 1. 阅读前先确认：设计与实现状态
 
-| 组成 | 参数量 | Stage 1 | Stage 2 |
-|---|---:|---|---|
-| 继承的共享 Flow | 11,127,108 | 训练 | 训练 |
-| HA-SMoE local router + 三组专家 | 2,560,524 | 训练 | 训练 |
-| Local-statistics CR-MoE Flow | 13,687,632 | 训练 | 训练 |
-| MoonViT 特征替换器 | 3,246,336 | 训练 | 冻结 |
-| MoonViT 编码器 | 不进入训练图 | 冻结缓存 | 冻结缓存 |
-| 总模型 | 16,933,968 | 16,933,968 可训练 | 13,687,632 可训练 |
-| Memory / 内部检测器 | 0 | 关闭 | 关闭 |
+**本次更新是文档和命名更新，不是训练实现升级。** 下文的新流程是已确定的迁移方向；当前代码仍执行历史 v1 协议。不能通过修改 README 就把旧检查点、旧预检或旧命令解释成新协议。
 
-### 2.1 轮廓级路由到底是什么
+| 项目 | 当前代码：历史 v1 | 新主线：待实现与验收 |
+| --- | --- | --- |
+| 视觉与轮廓网络 | MoonViT 缓存 + CR-MoE，128 点 | 保留架构与数据接口 |
+| 监督状态 | 线性插值进度的混合采样 | 50% 初始、20% 连续中间、30% GT 附近精修 |
+| 在线模仿 | 无独立入口 | 基于自身生成状态的完整残差监督 |
+| GDPO 轨迹 | 五个分数动作，full-extrap | 两个完整动作，与部署一致 |
+| 策略更新信号 | 各阶段独立归一化优势 | 最终轨迹优势 × 阶段质量权重 |
+| 奖励 | delta-NSD@2px，带毛刺惩罚 | NSD@1/2/4/8px 等权，无毛刺／自交惩罚 |
+| 几何探索 | 低频傅里叶法向场 | 保留低频和局部高幅单峰／单谷，另设匹配对照 |
+| 部署位移 | `[0.6667, 1.0]` | 两步均执行完整预测位移，不使用 frac |
+| 阶段条件 `s` | 由残余位移比例累计 | 统一的更新／精修阶段条件，具体取值待实现登记 |
 
-router 不为 128 个点分别选择专家。它只对当前轮廓位置采样的局部图像 token 做整条轮廓的 mean/std 汇聚，得到单个轮廓的 local descriptor，再经过一个共享 trunk，一次输出三组 logits。Global/local cross-attention 和时间/阶段 AdaLN 仍由 DiT 主干正常使用，但不参与专家选择：
+目前只有历史配置 `configs/stage1.yaml` 与 `configs/stage2_rl.yaml`。在线模仿入口、新混合采样器、两步 GDPO、局部探索及新奖励均不能在本仓库中宣称已完成。现有配置与命令的完整说明见[历史 v1 运行手册](docs/mainline_legacy_v1.md)。
+
+新主线只有在训练器、生产推理、配置、检查点元数据和测试一致通过后，才能标记为可运行；不提供尚不存在的启动命令。
+
+## 2. 方法：条件动作分布与多路径
+
+### 2.1 从单一位移到分布化动作
+
+给定图像 `I` 和当前轮廓 `C_t`，确定性方法预测一个更新 `Δ_t = f(I, C_t)`。在固定权重和相同输入下，其几何更新相同。
+
+FlowContour 建模条件动作分布 `p(Δ_t | I, C_t)`：通过少步 ODE 求解，将潜变量 `z_t` 映射为整条轮廓的联合位移。对于相同输入，改变潜变量可以得到不同候选，而不是先将所有可能修正压缩成一个位移。
 
 ```text
-[local mean/std]
-                         │
-                one contour router
-                         │
-             logits [N, 3, 4 experts]
-                    /       |       \
-              block 2   block 4   block 6
-                Top-2     Top-2     Top-2
+固定 I、C₀
+  ├─ z₁ → Δ₁ → C₁ → 重新观测 → Δ₂ → C₂
+  ├─ z₁′ → Δ₁′ → C₁′ → 重新观测 → Δ₂′ → C₂′
+  └─ z₁″ → Δ₁″ → C₁″ → 重新观测 → Δ₂″ → C₂″
 ```
 
-对某个 block 而言，Top-2 权重只有 `[N, 2]`，没有点维度 `P`，因此同一条轮廓的全部点使用同一对专家。三个 block 可以选择不同专家，但三组 logits 来自同一次 router 前向。输出层不参与路由。
+多路径来自连续的条件动作采样与视觉反馈，不是多个器官输出，也不是多个专家各自输出一条轮廓。CR-MoE 为同一次动作生成提供条件化适配，不能把专家数量当作路径数量。
 
-## 3. 仓库结构
+模型不保证每个种子都产生明显不同的位移，也不保证每个候选都更好。困难边界的标注歧义是研究动机；本仓库尚未提供多标注者数据证据，不能把人工示意或跨样本差异当成已经证明的条件多模态。
+
+### 2.2 模型多样性与训练探索必须分开
+
+- **模型自身多样性**：固定同一图像、同一轮廓和阶段条件，只改变潜变量，比较输出位移。
+- **GDPO 几何探索**：在生成动作上额外构造受控形变，用于寻找有价值的训练候选；不是部署时必开的噪声。
+- **完整轨迹分散程度**：同时包含输入状态已经不同造成的差异，不能直接当作同一状态下的随机性。
+
+阶段间比较多样性时，每个阶段选定或遍历明确的锚定状态，在每个固定状态下重复采样，再跨锚点统计。不能将来自不同输入的阶段二结果混在一起估计条件随机性；跨实例比较还应登记尺度归一化方法。
+
+## 3. 保持不变的网络与数据边界
+
+当前网络是逐张矢状位切片的纯 2D 模型。只读取中心切片及其 MoonViT `layer_18` 缓存，不使用 Memory、相邻切片特征、3D 网络、SAM 或内部检测器。GT box 与 GT anatomical class 属于 `oracle_prompt`，不能与自动提示结果混榜。
 
 ```text
-configs/
-  stage1.yaml                         # 唯一监督配置
-  stage2_rl.yaml                      # 唯一五阶段傅里叶 RL 配置
-  manifests/volmem_fourier_validation37.csv
-lib/
-  datasets/                           # VerSe 切片、目标构造、划分门
-  networks/mainline.py                # MoonViT cache + Flow 唯一网络
-  networks/diffusion/mainline_denoiser.py  # 唯一 6-layer/256-dim Flow 主干
-  networks/diffusion/ha_smoe.py       # 唯一轮廓级 E4 Top-2 专家实现
-  networks/diffusion/flow_matching_evolution.py # 监督目标与固定 2×4 AB2
-  rl/fourier.py                       # 傅里叶动作、log-prob、KL
-  evaluation/                         # TEAMS 2D 与 VerSe 3D 指标
-  runtime/gpu.py                      # 两次 15 秒严格空闲 GPU 门
-tools/
-  verify_installation.py              # CPU 数据/权重/数学核验
-  launch_supervised.py                # Stage 1 预检与正式启动
-  train_rl.py                         # Stage 2 核心训练器
-  launch_rl.py                        # Stage 2 预检与正式启动
-  infer.py                            # 固定 2×4 Dev8 推理/可视化
-train.py                              # Stage 1 底层训练循环
+中心切片 → 离线 MoonViT（448×448，patch 14，layer 18）
+         → float16 token [1152, Htoken, Wtoken]
+         → 特征替换器 → 128×128 轮廓特征网格
+
+GT box / class → Route-B box-octagon → 128 点初始轮廓
+              → CR-MoE Flow → 联合轮廓动作
 ```
 
-启动正式任务时只调用 `launch_supervised.py` 或 `launch_rl.py`，不要绕过审计入口直接调用底层训练器。
+CR-MoE 对当前轮廓位置的局部图像 token 做 mean/std 汇聚，一个共享 router 一次输出 `[N, 3, 4]` logits，分别用于 DiT 第 2/4/6 层。每层的 Top-2 权重无点维度，整条轮廓共享专家组合；共享 Dense FFN 始终执行，稀疏专家仅提供残差，速度输出头保持 Dense。
 
-## 4. 环境
+主干 global/local cross-attention 与时间／阶段 AdaLN 保留，但不作为 router 的额外输入。没有点级路由、独立逐层 router、全层 MoE 或输出头混合。
 
-已验证环境为 Python 3.11、PyTorch 2.4.1 + CUDA 12.1。先安装与本机 CUDA 匹配的 PyTorch，再安装其余依赖：
+| 组成 | 参数量 | 混合状态预训练：目标 | 在线模仿：目标 | GDPO：目标 |
+| --- | ---: | --- | --- | --- |
+| 共享 Flow | 11,127,108 | 训练 | 训练 | 训练 |
+| CR-MoE router 与残差专家 | 2,560,524 | 训练 | 训练 | 训练 |
+| 完整 Flow | 13,687,632 | 训练 | 训练 | 训练 |
+| MoonViT 特征替换器 | 3,246,336 | 训练 | 冻结 | 冻结 |
+| MoonViT 编码器 | 不进入训练图 | 冻结缓存 | 冻结缓存 | 冻结缓存 |
+| 总模型 | 16,933,968 | 16,933,968 可训练 | 13,687,632 可训练 | 13,687,632 可训练 |
 
-```bash
-python -m pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
-python -m pip install -r requirements.txt
-```
+128 点暂保留为主线规格。256 点是候选，不因追加训练改善就直接替换默认值；其点数配置、目标构造、形变宽度、检查点和推理接口仍需独立验收。
 
-启动器还要求系统提供 `nvidia-smi`。训练和推理都会对指定物理 GPU 连续采样两次，间隔 15 秒；两次都必须满足：显存占用不超过 20 MiB、利用率为 0、compute app 列表为空。
+## 4. 混合状态预训练：完整残差与末端精修
 
-建议先定义本机路径，后续命令直接复用：
+迁移起点为近期实验中的以下配方，不宣称比例已经最优：
 
-```bash
-PYTHON=/path/to/python
-DATA_ROOT=/path/to/sagittal_2d_fixed
-SLICE_MANIFEST="$DATA_ROOT/manifests/slice_manifest.csv"
-MOONVIT_CACHE=/path/to/sagittal_moonvit_cache
-STAGE1_SOURCE=/path/to/pure2d_moonvit_dense_step19000.pt
-STAGE2_SOURCE=/path/to/cr_moe_stage1_selected.pt
-STAGE2_SOURCE_SHA256=<64位完整SHA256>
-STAGE2_SOURCE_STEP=<checkpoint中的step>
-CASE_METADATA=/path/to/case_metadata.csv
-```
+| 状态来源 | 概率 | 构造与目的 |
+| --- | ---: | --- |
+| 初始轮廓 | 50% | GT box 初始化，保留原框扰动，学习大范围定位修正 |
+| 连续中间轮廓 | 20% | 在初始轮廓与对齐 GT 之间连续采样，覆盖中间状态 |
+| GT 附近精修轮廓 | 30% | 在 GT 上施加傅里叶几何扰动，学习到位后的剩余修正 |
 
-模型和缓存不要复制进 Git。`artifacts/checkpoints/...` 只是配置中的说明性默认位置；正式启动器始终使用命令行传入的绝对路径。
+这里的 50/20/30 是状态类别概率，不是执行位移的比例。中间轮廓仍可被采样，不再特别偏重几个固定线性插值位置。原框扰动的概率、平移、缩放和边缘参数保留，并随配置签名。
 
-## 5. 数据与缓存
+无论来自哪类状态，监督目标均为 `Δ* = C_GT − C_current`，不乘外层 frac。GT 的点数、方向、循环起点与坐标尺度必须按同一规则对齐，再构造 Flow Matching 的噪声插值与速度监督。不能把大幅初始化任务改成只训练 GT 周围的小扰动。
 
-### 5.1 固定划分
+该阶段训练完整 Flow 和特征替换器。具体初始化来源、学习率、预算和扰动范围在新配置落地时登记；历史 v1 的签名 Dense 源与迁移合同保留，不因为文档更新而重新解释旧权重。
 
-| 用途 | 口径 | 数量 | 是否更新参数 |
-|---|---|---:|---|
-| 监督/RL 训练 | Train72 | 72 cases / 13,261 rows | 是 |
-| RL 选择 | Val37 | 37 cases / 5,914 rows | 否；固定抽取 80-row panel |
-| 最终开发评估 | Dev8 | 8 cases / 1,123 rows | 否 |
-| 锁定集 | 010/011/013 | 3 cases | 禁止读取 |
+## 5. 后训练一：在线模仿微调
 
-`slice_manifest.csv` 至少包含：
+人工扰动能扩展状态覆盖，但不能完全替代模型自身的错误。在线模仿直接在当前策略的生成状态上建立监督：
+
+1. 从预训练检查点出发，按两步完整位移协议生成轮廓。
+2. 收集自身产生的中间状态；状态生成不反传跨轨迹梯度。
+3. 用同一 GT 对齐规则构造该状态到 GT 的完整残差，执行监督 Flow Matching 更新。
+4. 冻结视觉缓存和特征替换器，只更新完整 Flow，包括 CR-MoE router 与专家。
+
+采样状态是否更新、刷新频率、采样阶段与种子均需记录。对照应匹配额外监督更新数，区分“在线状态有用”与“仅多训了若干步”。BTCV 的额外 500 步结果是迁移依据，不自动成为 VerSe 最优训练预算。
+
+## 6. 后训练二：GDPO 几何探索强化学习
+
+GDPO 在自身生成的两步轨迹上，根据最终分割质量优化动作倾向。名称统一为 GDPO；组相对优势、PPO 式裁剪、参考策略约束及动作概率实现都必须按实际代码说明，不能仅靠改名宣称换了优化算法。
+
+### 6.1 探索：整体低频与局部高幅峰谷
+
+保持 ODE 生成过程不变，在生成的轮廓动作上沿法向施加受控形变：低频傅里叶场负责连续整体修正，局部单峰／单谷负责局部突起或凹陷候选。候选变差是允许的，目标是产生有价值的修正并改善训练后的策略，而不是让每条候选都获胜。
+
+近期 BTCV 窄支撑候选使用以下配方，**是待迁移、待验证的实验配置，不是 VerSe 已验证默认值**：
+
+| 项目 | BTCV 候选配方 |
+| --- | --- |
+| 每组轨迹数 | 8，每条两步完整动作 |
+| 低频 | 8 个正交模式，两阶段系数尺度 `[1.2, 0.8]` 输入像素 |
+| 局部触发 | 第一步不加；第二步 8 个候选中 1 个叠加局部项 |
+| 峰／谷 | 正负等概率，位置不使用 GT 选优 |
+| 幅度 | 中心 2/3/4px，概率 0.70/0.25/0.05，连续高度标准差 1px |
+| 支撑宽度 | 参考 128 点轮廓的 8/12 点，概率 0.30/0.70 |
+
+幅度中心不是硬上限；傅里叶系数尺度也不是每个顶点固定移动的距离。换点数时应按归一化弧长重新定义局部宽度，不可机械照搬点数。
+
+低频单独配置保留为同预算消融，不能悄悄删掉局部项后继续称作混合探索。局部项的分量条件、投影、概率与重放规则必须匹配；若使用投影高斯代理，不得称作完整 Flow 动作的精确似然。概率重放误差门与 PPO 的 approx-KL 门分别记录，不绕过检查或放宽阈值掩盖失败。
+
+### 6.2 奖励：多尺度边界质量
+
+新主线的候选质量分数为硬阈值多尺度 NSD：
 
 ```text
-split,case_id,slice_idx,image_path,mask_path
+Q(C) = [NSD@1px(C, GT) + NSD@2px(C, GT)
+      + NSD@4px(C, GT) + NSD@8px(C, GT)] / 4
+R_rollout = Q(C_final)
 ```
 
-`image_path` 和 `mask_path` 可以是绝对路径，也可以相对 `DATA_ROOT`。同一 case 的 `slice_idx` 必须唯一、连续；启动时会严格核对 case 数、row 数和锁定病例。
+不再使用 0.5px 项，不加入毛刺或自交惩罚。这里是原输入图像二维像素容差，不是特征网格像素，也不是 VerSe 三维毫米；边界提取、空预测处理和 NSD 的对称归一化定义必须随实现固定。
 
-完整 3D 评估还需要 `CASE_METADATA` CSV，至少包含：
+最终分数使用采样轨迹本身的质量，不使用旧版“采样外推端点减确定性外推端点”的奖励。组内比较由优势归一化完成。Dice、逐器官指标和物理空间指标仍需单独评估，不能拿更宽容的 8px 得分上涨替代质量提升。
+
+新 1/2/4/8px 组合尚无稳定训练收益结论。验收包括候选排序、单项饱和率、组内分差及训练后固定指标；旧尺度对照保留。软边界分数如被用于消融，必须单独命名，不能冒充硬阈值 NSD。
+
+### 6.3 信用：最终结果决定优势，阶段质量决定分配
+
+在同一实例的 K 条轨迹内，用最终奖励构造组相对优势 `A_k`。设 `q[k,t] = Q(C[k,t+1])` 是第 t 个动作之后的非负质量，迁移现有实验的分配规则：
 
 ```text
-case_id,image_nii_path,mask_nii_path,canonical_shape
+A_k = clip((R_k − mean_k R) / max(std_k R, std_floor))
+w[k,t] = T × q[k,t] / sum_t q[k,t]     # 分母为零时，各阶段权重取 1
+A[k,t] = stop_gradient(w[k,t] × A_k)
+T = 2
 ```
 
-其中 `canonical_shape` 使用例如 `48x487x633` 的格式。对应 GT 旁还必须存在签名 VerSe centroid JSON。
+该归一化配合按阶段取平均的策略损失，保证 `mean_t w[k,t] = 1`、`mean_t A[k,t] = A_k`；不能把它误写成未归一化的“总和守恒”。阶段权重不能改变最终优势的正负号；最终优势为零时，不能独立产生阶段奖励更新。
 
-### 5.2 MoonViT 缓存
+它是阶段质量加权的启发式信用分配，不宣称是精确因果归因。不得改回各阶段独立归一化即时优势，也不能只计算或记录最终优势，却在 PPO 更新中使用另一个信号。
 
-缓存目录固定为：
+### 6.4 优化与有效更新
+
+迁移时优先保留既有优化器、裁剪、KL 和冻结约束，避免同时更改架构、奖励、探索和信用。当前 v1 的 `K=8`、PPO epochs 2、clip 0.05、approx-KL 0.002、KL beta 0.01、优势标准差下限 0.1、优势裁剪 2.0、梯度裁剪 0.25、LR 4e-8 只作为继承基线；新预算须在版本化配置中登记。
+
+空 batch 不计有效更新。真实局部触发、冻结张量零变化、有限梯度、概率重放及信用检查均通过后才可启动正式版本；短预检权重不作为正式训练起点。
+
+## 7. 目标推理协议：两步完整位移，8 NFE
 
 ```text
-$MOONVIT_CACHE/{training,validation,test}/<case_id>/x<slice_idx:04d>.npz
+C₀ ── AB2×4 → 完整 Δ₁ ──→ C₁
+C₁ ── 重新采样图像特征 ── AB2×4 → 完整 Δ₂ ──→ C₂
 ```
 
-正式规格：
+两个动作均执行全部预测位移，不使用 frac，也不构造 full-extrap 端点。4 次 AB2 速度场求值属于数值求解，不是 4 个 RL 动作；两步共有 8 NFE。训练、在线状态生成、验证与部署必须共用同一生产采样语义。
 
-| 字段 | 固定值 |
-|---|---|
-| MoonViT 输入 | 448×448 |
-| patch size | 14 |
-| 使用层 | `layer_18` |
-| 通道数 | 1152 |
-| dtype | float16 |
-| 融合模式 | `center_only` |
-| 常见 token 网格 | 32×32；非方形图像保留有效宽高映射 |
+阶段条件 `s` 不再由 frac 累计，也不代表已完成的 GT 比例。它只表示约定的更新／精修阶段，编码值必须在三段训练和推理中统一；本次文档不擅自确定数值。GT 附近精修和在线状态监督应覆盖对应阶段，不能令模型假定第二步已经到达 GT。
 
-每个 `.npz` 还必须提供 `grid_hw/orig_hw/resized_hw/padded_hw/pad/scale/patch_size/input_size/normalization/checkpoint/case_id/slice_idx`。数据加载器会核对路径、shape、dtype、坐标空间和元数据，缺失时直接失败，不使用匹配子集降级。
+固定评价关闭额外几何探索，登记 seed、每阶段初始 latent、尺度、采样数和求解器。展示多路径时则固定输入、改变明确登记的潜变量种子，不挑 GT 最优轨迹冒充单次预测。
 
-现有缓存的来源标识为：
+特别注意：当前主线 v1 使用真实 AB2 和 latent scale 1.0；近期 BTCV 评价使用原 V5 求值与零 latent。这两个协议不相同，不能改换 latent 或求解器后仍宣称同一对照。
+
+## 8. 数据、缓存与评价标准
+
+### 8.1 VerSe 主线固定边界
+
+| 用途 | 划分 | 数量 | 约束 |
+| --- | --- | ---: | --- |
+| 训练，包括两段后训练 | Train72 | 72 cases / 13,261 rows | 可以更新参数 |
+| 开发选择 | Val37 | 37 cases / 5,914 rows | 固定 80-row panel，不更新参数 |
+| 最终开发评估 | Dev8 | 8 cases / 1,123 rows | 不参与调参 |
+| 锁定病例 | sub-verse010/011/013 | 3 cases | 禁止读取 |
+
+`slice_manifest.csv` 至少含 `split,case_id,slice_idx,image_path,mask_path`；路径绝对或相对数据根目录，case 内切片索引唯一连续。3D 评价还需要 case metadata、NIfTI 与签名 centroid JSON；不能拿 2D 切片指标替代完整病例指标。
+
+MoonViT 缓存使用 `{training,validation,test}/<case_id>/x<slice_idx:04d>.npz`，固定 448 输入、patch 14、`layer_18`、1152 通道、float16、`center_only`。保留 `grid_hw/orig_hw/resized_hw/padded_hw/pad/scale/patch_size/input_size/normalization/checkpoint/case_id/slice_idx` 校验；不能缺失后降级到匹配子集。缓存来源标识为 `Eagle/Embodied/work_dirs/1232_final_locany_full_more10000/checkpoint-3000`，不能更换权重重建后仍称同一血缘。
+
+VerSe 报告保留前景与实例指标、完整病例的 Dice/ID rate/maxHD/dmean，以及固定协议的实际轮廓图。像素尺度和物理尺度、逐切片与逐病例加权、oracle 与自动提示必须明确区分，不为了数值更高而切换口径。
+
+### 8.2 BTCV 证据不直接转成 VerSe 成绩
+
+近期 BTCV 对照固定：全部 847 切片等权的联合前景 Dice，保留失败；GT box/class、Memory off、seed20260731、两步完整位移、每步 4 次原 V5 求值、零 latent、推理关闭探索。逐器官 Dice 和多尺度 NSD 只是辅助，不能替换主指标。
+
+该口径仅用于 BTCV 历史对照。不能将其分数、检查点、优化预算或求解实现直接移作 MoonViT＋CR-MoE VerSe 成绩。完整、带限制的结果见[近期证据快照](docs/mainline_evidence_20261022.md)。
+
+## 9. 仓库入口与运行状态
+
+以下文件真实存在，但本次提交没有改变它们的训练行为：
 
 ```text
-Eagle/Embodied/work_dirs/1232_final_locany_full_more10000/checkpoint-3000
+configs/stage1.yaml                         历史 v1 监督配置
+configs/stage2_rl.yaml                      历史 v1 五阶段 GDPO 配置
+lib/networks/mainline.py                    MoonViT cache + Flow
+lib/networks/diffusion/mainline_denoiser.py  6-layer / 256-dim 主干
+lib/networks/diffusion/cr_moe.py             CR-MoE 主实现
+lib/networks/diffusion/flow_matching_evolution.py
+                                            现行监督状态和 AB2 采样
+lib/rl/fourier.py                           现行低频动作、投影概率与 KL
+lib/train/gdpo_utils.py                     GDPO 数值工具
+lib/train/rewards/region_reward.py          现行奖励与评价实现
+tools/verify_installation.py                CPU 数据、权重、数学核验
+tools/launch_supervised.py                  历史 v1 监督预检与启动
+tools/train_rl.py                          历史 v1 GDPO 训练器
+tools/launch_rl.py                         历史 v1 GDPO 预检与启动
+tools/infer.py                             历史 v1 2×4 AB2 推理
+train.py                                  监督底层循环
 ```
 
-如果原始 MoonViT 权重不可用，可以继续使用已签名缓存做训练和评估；不能用另一份权重重建缓存后仍声称是同一实验血缘。
-
-### 5.3 先做 CPU 核验
-
-```bash
-"$PYTHON" tools/verify_installation.py \
-  --config configs/stage2_rl.yaml \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --checkpoint "$STAGE2_SOURCE" \
-  --checkpoint-sha256 "$STAGE2_SOURCE_SHA256" \
-  --expected-step "$STAGE2_SOURCE_STEP"
-```
-
-`status=PASS` 才能继续。它会读取真实 foreground 样本、核对 Train72 与锁定病例、严格加载完整 HA-SMoE checkpoint、检查 16,933,968 参数，并验证五阶段进度与傅里叶投影。
-
-## 6. Stage 1：监督训练
-
-唯一配置为 `configs/stage1.yaml`。它从签名的 MoonViT-cache Dense 主线 local step19000（由 absolute step40000 起训，等效 absolute step59000）做一次受控 weights-only 迁移。该文件是原 Dense MoonViT 长训保留下来的最高完整检查点；旧 absolute step40000 文件已不再作为发布依赖。所有原参数必须精确匹配，只允许新增轮廓级 local-statistics router 和第 2/4/6 层专家参数；不允许 shape 跳过、重叠拷贝或其他 missing/unexpected。随后建立新的 AdamW，不继承旧优化器状态。
-
-固定 source：
-
-```text
-checkpoint step = 19000
-equivalent absolute step = 59000
-SHA256 = a337ba1566fe423c10a82dc4c08f8d6936ce8fc49ff1d61c8f735435854a337f
-```
-
-固定训练合同：
-
-| 项目 | 值 |
-|---|---:|
-| optimizer | AdamW |
-| learning rate | 1e-5 |
-| warmup | 1,000 updates |
-| batch size | 48 |
-| local updates | 60,000 |
-| checkpoint | 每 1,000；保留 12 个 |
-| 里程碑 | 5k / 10k / 20k / 40k / 60k |
-| 可训练参数 | HA-SMoE Flow + 特征替换器，共 16,933,968 |
-| 初始化 | GT Route-B box-octagon + jitter |
-
-### 6.1 两步预检
-
-输出目录必须不存在：
-
-```bash
-STAGE1_PREFLIGHT=data/outputs/stage1_preflight_YYYYMMDD
-
-"$PYTHON" tools/launch_supervised.py \
-  --mode preflight \
-  --preflight-steps 2 \
-  --gpu 6 \
-  --source-checkpoint "$STAGE1_SOURCE" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --output-root "$STAGE1_PREFLIGHT"
-```
-
-预检通过时：
-
-- `PURE2D_TRAINING_LAUNCH.json` 为 `COMPLETED`；
-- source local step19000/SHA、参数量、Train72/Dev8 身份通过；
-- step1/2 loss 与更新有限；
-- Flow 和特征替换器都至少有一个张量更新；
-- Dense source 的全部旧张量都存在且 shape 一致；新增张量只能来自四个已登记的 HA-SMoE 前缀；
-- 新增 HA-SMoE 张量全部有限，不出现 partial copy、shape skip 或其他 missing/unexpected。
-
-### 6.2 正式训练
-
-正式运行必须引用同一输入身份的已完成预检，并写入另一个新目录：
-
-```bash
-STAGE1_RUN=data/outputs/stage1_60k_YYYYMMDD
-
-"$PYTHON" tools/launch_supervised.py \
-  --mode train \
-  --gpu 6 \
-  --source-checkpoint "$STAGE1_SOURCE" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --preflight-output "$STAGE1_PREFLIGHT" \
-  --output-root "$STAGE1_RUN"
-```
-
-Stage 2 source 必须是 Stage 1 产生的完整 HA-SMoE checkpoint。选择后记录文件的完整 SHA256 和 `step`，随后所有 RL 预检、正式训练与恢复都显式传入这两个值。不要使用旧 14.37M Dense checkpoint 直接进入 Stage 2，也不要把不完整文件当作恢复源。
-
-## 7. 固定 2×4 部署推理
-
-部署轨迹是不可变的：
-
-| 外阶段 | residual fraction | 输入进度 `s` | AB2 NFE |
-|---:|---:|---:|---:|
-| 1 | 0.6667 | 0.0 | 4 |
-| 2 | 1.0 | 0.6667 | 4 |
-
-累计进度按 `s_next = s + (1-s) × fraction` 更新。两个阶段使用各自的随机初始 latent；RL 对齐测试与生产函数必须使用相同 latent 定义。第二阶段在更新后的轮廓位置重新取特征。
-
-以下都属于错误实验：把 5 阶段训练轨迹当作部署、把 4 次 AB2 调用当作 4 个动作、漏传 `s`、第二阶段复用旧位置特征，或在推理时打开傅里叶探索。
-
-## 8. Stage 2：五阶段傅里叶 full-extrap GRPO
-
-唯一配置为 `configs/stage2_rl.yaml`。MoonViT 特征替换器逐 tensor 冻结，只更新 13,687,632 个 local-statistics HA-SMoE Flow 参数，其中包括共享 Flow、轮廓 router 和路由专家。
-
-### 8.1 五阶段训练网格
-
-每个阶段的 Flow 都预测当前位置到目标的完整剩余位移，`residual fraction` 决定本阶段只执行其中多少。由 `s_next = s + (1-s) × fraction` 可知，这五个比例把累计进度推进到约 20% / 40% / 60% / 80% / 100%。
-
-| 动作 | 阶段开始进度 `s` | 取当前剩余位移的比例 | 阶段结束进度 | Fourier 系数 σ | 单点期望 RMS | 每阶段 NFE |
-|---:|---:|---:|---:|---:|---:|---:|
-| a0 | 0.0 | 0.2 | 0.2 | 0.8 | 约 0.20 px | 4 |
-| a1 | 0.2 | 0.25 | 0.4 | 0.7 | 约 0.175 px | 4 |
-| a2 | 0.4 | 0.3333 | 0.59998 | 0.6 | 约 0.15 px | 4 |
-| a3 | 0.59998 | 0.5 | 0.79999 | 0.5 | 约 0.125 px | 4 |
-| a4 | 0.79999 | 1.0 | 1.0 | 0.4 | 约 0.10 px | 4 |
-
-例如初始剩余位移为 100：五阶段依次执行 `20、80×0.25、60×1/3、40×0.5、20×1`，每次约推进原始总位移的 20。Fourier σ 是八个正交低频系数的尺度；128 点轮廓上的单点期望 RMS 为 `σ×sqrt(8/128)=σ/4`，不能把 σ 直接理解为每个点固定移动同样多。
-
-每个阶段只有一个 RL 动作：8 个低频正交傅里叶系数生成标量场，再沿轮廓法向形成几何扰动。一次训练 rollout 有 5 个动作和 20 NFE；`outer_log_count_mean` 必须为 5，不是 20。
-
-### 8.2 full-extrap 奖励归因
-
-对于阶段起点 `x_start`、阶段终点 `x_end` 和 residual fraction `f`，该阶段的完整外推轮廓为：
-
-```text
-x_full = x_start + (x_end - x_start) / f
-```
-
-每个动作都与同阶段、同 latent 的确定性 Flow 外推端点比较，因此 credit map 为 `[0,1,2,3,4]`。这不是把最终奖励复制五次；每个阶段拥有自己的反事实完整端点。
-
-策略奖励统一使用正式主线的二维 `delta-NSD@2px`：
-
-```text
-stage_reward = NSD@2px(sampled_full_extrap)
-             - NSD@2px(deterministic_full_extrap)
-             - 0.06 × sampled_burr_penalty
-
-terminal_reward = NSD@2px(sampled_final)
-                - NSD@2px(deterministic_final)
-                - 0.06 × sampled_burr_penalty
-```
-
-NSD 对称统计“预测边界落在 GT 边界 2 px 内的比例”和“GT 边界落在预测边界 2 px 内的比例”，两项各占一半。这里是二维图像坐标中的 2 px，不是最终 VerSe 三维评估中的 NSD@2mm。Dice、IoU、mBoundF 只用于验证与报告，不进入策略奖励。毛刺项继续使用 margin 0.5 px、尺度上限 1.5 px 和 q95。
-
-### 8.3 GRPO/PPO 固定值
-
-| 项目 | 值 |
-|---|---:|
-| K rollouts | 8 |
-| PPO epochs | 2 |
-| clip | 0.05 |
-| approx-KL stop | 0.002 |
-| explicit KL beta | 0.01 |
-| advantage std floor / clip | 0.1 / 2.0 |
-| grad clip | 0.25 |
-| learning rate | 4e-8 |
-| 有效更新目标 | 10,000 |
-| 诊断/保存间隔 | 50 updates |
-| 固定选择面板 | Val37 中 80 rows |
-
-空轮廓 batch 会跳过且不计有效 RL step。approx-KL 超门只结束当前 PPO epoch，不结束正式训练。训练前 step0 面板必须至少达到 IoU 0.45、Dice 0.60，否则说明 source、缓存或路径错了，应立即停止。
-
-### 8.4 两步预检
-
-签名 Val37 清单是 `configs/manifests/volmem_fourier_validation37.csv`，共 5,914 行，路径相对 `DATA_ROOT`，SHA256 为：
-
-```text
-24a4f19651edb5d187029f0255e2b59f9dce40f320ee29c14b709e8e92e6e6ad
-```
-
-```bash
-STAGE2_PREFLIGHT=data/outputs/stage2_rl_preflight_YYYYMMDD
-
-"$PYTHON" tools/launch_rl.py \
-  --mode preflight \
-  --gpu 6 \
-  --python "$PYTHON" \
-  --source-checkpoint "$STAGE2_SOURCE" \
-  --source-sha256 "$STAGE2_SOURCE_SHA256" \
-  --source-step "$STAGE2_SOURCE_STEP" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --output "$STAGE2_PREFLIGHT" \
-  --preflight-output "$STAGE2_PREFLIGHT"
-```
-
-预检必须同时满足：五阶段训练 helper 与生产采样函数 `max_abs≤1e-5`；固定 2×4 部署 helper 与生产函数 `max_abs≤1e-5`；step1/2 数值有限；每步 5 个动作日志；Flow 更新；3,246,336 个冻结参数零变化；checkpoint step2 完整。
-
-### 8.5 正式训练与恢复
-
-```bash
-STAGE2_RUN=data/outputs/stage2_rl_10k_YYYYMMDD
-
-"$PYTHON" tools/launch_rl.py \
-  --mode train \
-  --gpu 6 \
-  --python "$PYTHON" \
-  --source-checkpoint "$STAGE2_SOURCE" \
-  --source-sha256 "$STAGE2_SOURCE_SHA256" \
-  --source-step "$STAGE2_SOURCE_STEP" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --preflight-output "$STAGE2_PREFLIGHT" \
-  --output "$STAGE2_RUN"
-```
-
-中断后只能从完整 RL checkpoint 恢复到**新输出目录**：
-
-```bash
-STAGE2_RESUME=data/outputs/stage2_rl_resume_YYYYMMDD
-
-"$PYTHON" tools/launch_rl.py \
-  --mode train \
-  --gpu 6 \
-  --python "$PYTHON" \
-  --source-checkpoint "$STAGE2_SOURCE" \
-  --source-sha256 "$STAGE2_SOURCE_SHA256" \
-  --source-step "$STAGE2_SOURCE_STEP" \
-  --resume-checkpoint /path/to/previous/checkpoints/latest.pt \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --moonvit-cache "$MOONVIT_CACHE" \
-  --preflight-output "$STAGE2_PREFLIGHT" \
-  --output "$STAGE2_RESUME"
-```
-
-启动器拒绝复用任何已有目录，并把 config、trainer、Python、source 和选择清单的哈希写入 `manifest.json`。
-
-## 9. 推理、评估与可视化
-
-先用少量前景切片验证前向链路。`--smoke-slices N` 会按 Dev8 manifest 顺序选取前 N 张含 GT 前景的切片；结果标记为 `SMOKE_PASS`、`reportable=false`，不会生成或冒充完整 3D 指标：
-
-```bash
-SMOKE_OUT=data/outputs/inference_smoke_YYYYMMDD
-
-"$PYTHON" tools/infer.py \
-  --gpu 6 \
-  --checkpoint "$STAGE2_SOURCE" \
-  --result-dir "$SMOKE_OUT" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --case-metadata "$CASE_METADATA" \
-  --locate-feat-cache-root "$MOONVIT_CACHE" \
-  --batch-size 1 \
-  --num-workers 0 \
-  --smoke-slices 2
-```
-
-完整 Dev8 使用同一命令并把 `--smoke-slices` 设为 `0`：
-
-```bash
-FULL_OUT=data/outputs/inference_dev8_YYYYMMDD
-
-"$PYTHON" tools/infer.py \
-  --gpu 6 \
-  --checkpoint /path/to/final_or_milestone.pt \
-  --result-dir "$FULL_OUT" \
-  --data-root "$DATA_ROOT" \
-  --slice-manifest "$SLICE_MANIFEST" \
-  --case-metadata "$CASE_METADATA" \
-  --locate-feat-cache-root "$MOONVIT_CACHE" \
-  --batch-size 16 \
-  --num-workers 4 \
-  --smoke-slices 0
-```
-
-完整运行必须处理 1,123 张 Dev8 切片，严格加载 16,933,968 参数，并输出：
-
-- foreground IoU、Dice、mBoundF、HD95；
-- PQ、SQ、RQ、TP/FP/FN；
-- VerSe 3D Dice、ID rate、maxHD、dmean；
-- Route-B 初始化、GT、预测和 FP/FN 误差可视化；
-- 输入/代码/checkpoint SHA、GPU 门、运行时间和完整身份 JSON。
-
-RL 训练的五阶段轨迹从不用于这里；`tools/infer.py` 会强制关闭 RL 探索和数据增强，并固定 2×4 AB2。
-
-## 10. 输出验收与故障处理
-
-每个 checkpoint 至少核对：
-
-1. 文件大小稳定且可计算 SHA256；
-2. Stage 1 迁移只新增登记的 HA-SMoE 张量；Stage 2/推理的 key/shape 与 HA-SMoE source 严格一致；
-3. 全部浮点张量有限；
-4. Stage 1 中 Flow 与替换器都更新；Stage 2 中只有 Flow 更新；
-5. 日志的 reward/loss/grad/ratio/approx-KL 有限；
-6. Stage 2 `outer_log_count_mean=5`；
-7. 五阶段训练对齐和 2×4 部署对齐持续为 PASS；
-8. `manifest` 的状态、输入哈希、物理 GPU 和输出目录正确。
-
-遇到 OOM、非有限值、严格加载失败、冻结张量变化、进程消失或数据门失败时：保留现有日志和 manifest，不覆盖、不自动重试、不删除 checkpoint。修复后使用新输出目录重新预检。
-
-短时 loss 波动不是早停依据。Dev8 不参与调参；最终论文表必须等 Stage 2 完成后，再用完整 Dev8 和相同 `oracle_prompt` 口径一次性冻结。`fully_automatic` 与 `oracle_prompt` 永远不能混榜。
-
-## 11. 新接手者清单
-
-- [ ] 克隆仓库并安装 `requirements.txt`。
-- [ ] 准备 Train72/Val37/Dev8 数据、slice manifest、case metadata 和 MoonViT cache。
-- [ ] 核对 Dense MoonViT local step19000 source SHA；Stage 1 完成后登记所选 HA-SMoE checkpoint 的 SHA 与 step。
-- [ ] 运行 `tools/verify_installation.py` 并得到 `PASS`。
-- [ ] 选择真正空闲 GPU；不终止、不抢占其他进程。
-- [ ] Stage 1：新目录做 2-step preflight，再启动唯一正式运行。
-- [ ] Stage 2：使用完整 HA-SMoE source，新目录做 2-step preflight，再做 10k 有效更新。
-- [ ] 恢复训练时使用完整 checkpoint，并写入新目录。
-- [ ] 先跑非报告 smoke inference，再跑完整 Dev8。
-- [ ] 检查 manifest、SHA、冻结参数和可视化后再汇报结果。
-
-本仓库不包含历史对比模型、探索配置、输出头 MoE、点级路由、旧 RL 分支或运行中状态记录；Git 中的两个配置、唯一 HA-SMoE 架构和五个公开入口就是全部正式流程。
+当前可复现环境为 Python 3.11、PyTorch 2.4.1 + CUDA 12.1，其他依赖见 `requirements.txt`。数据、权重、约 84GB MoonViT 缓存与训练输出均不进入 Git；正式命令显式传入绝对路径，不能把说明性默认路径当作真实权重。
+
+现有启动器要求物理 GPU 连续两次、间隔 15 秒满足显存 ≤20MiB、利用率 0、compute app 为空；本次不改变 GPU 门、不启动训练、不终止其他作业。历史运行命令、源权重 SHA 与恢复说明统一见[历史 v1 手册](docs/mainline_legacy_v1.md)，运行它们只会复现 v1。
+
+## 10. 新主线落地与验收清单
+
+- [ ] 混合采样器包含初始／连续中间／精修，概率和原框扰动均有测试与日志。
+- [ ] 在线模仿入口真实采集自身生成状态，并记录冻结范围、刷新策略和检查点血缘。
+- [ ] 两步完整动作在训练、模仿、验证、生产采样中一致，各步 4 次真实 AB2 求值。
+- [ ] `s` 的定义与数值在各入口一致，不再由 frac 累计或暗含 GT 已到位。
+- [ ] GDPO 真正以终点优势更新，阶段权重 detach，符号保持、均值信用守恒。
+- [ ] 1/2/4/8px 奖励坐标与定义固定，无毛刺／自交项，排序、饱和与组内差异有诊断。
+- [ ] 局部大幅峰谷真实触发；概率实现匹配，重放误差严格小于 0.002，不绕过或放宽。
+- [ ] Flow 与 CR-MoE 更新，后训练特征替换器和其他冻结张量零变化。
+- [ ] 原生训练停止步数覆盖配置目标；空 batch 不计有效更新。
+- [ ] 全新输出目录完成两次真实更新预检，再从登记的原始源启动正式任务。
+- [ ] 检查点登记协议、点数、solver、NFE、latent、代码／配置／源 SHA；严格加载不跳 shape。
+- [ ] 完整恢复核对模型、优化器、调度器与进程 RNG，不宣称多进程数据流逐位重放。
+- [ ] 同预算低频对照、额外种子和固定端点评估完成，保留负结果，不把开发集最佳值当独立测试。
+- [ ] 推理先做 `reportable=false` 的 smoke，再运行完整固定划分；不跳过失败样本。
+
+遇到 OOM、非有限值、概率重放失败、冻结张量变化、源身份变化或进程异常，保留日志、失败快照和检查点，先定位再开新版本预检；不覆盖旧模型或自动放宽门限。兼容的参数 shape 不等于兼容的新协议，也不能沿用旧预检批准新训练。
+
+本次审核范围是 README 与配套文档，不含新流程代码、训练参数、运行中的实验或远端推送。历史 v1 仍可复现，新主线实现状态以本节验收和实际提交为准。
