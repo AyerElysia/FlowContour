@@ -107,7 +107,7 @@ class CRMoEArchitectureTest(unittest.TestCase):
             torch.randn(2, 16, 2),
             torch.tensor([100.0, 700.0]),
             py_ind=torch.tensor([0, 1]),
-            s=torch.tensor([0.0, 0.6667]),
+            s=torch.tensor([0.0, 1.0]),
         )
         self.assertEqual(tuple(prediction.shape), (2, 16, 2))
         self.assertTrue(torch.isfinite(prediction).all())
@@ -122,5 +122,3 @@ class CRMoEArchitectureTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-HASMoEArchitectureTest = CRMoEArchitectureTest

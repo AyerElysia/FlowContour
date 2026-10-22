@@ -352,8 +352,6 @@ class MainlineDiTBlock(nn.Module):
             expert_init_std=1e-4,
         )
 
-    enable_ha_smoe = enable_cr_moe
-
     def reg_loss(self) -> torch.Tensor:
         if self.routed_moe is None:
             return self.adaLN_modulation[-1].weight.new_zeros(())
@@ -461,7 +459,6 @@ class MainlineFlowDenoiser(nn.Module):
 
         # Human block numbers 2/4/6 map to zero-based Python indices 1/3/5.
         self._cr_moe_layer_indices = (1, 3, 5)
-        self._ha_smoe_layer_indices = self._cr_moe_layer_indices
         self._contour_moe_router = ContourRoutePath(
             dim=self.state_dim,
             num_routed_blocks=len(self._cr_moe_layer_indices),
@@ -496,20 +493,9 @@ class MainlineFlowDenoiser(nn.Module):
         sampled_feat: torch.Tensor,
         x_t: torch.Tensor,
         t: torch.Tensor,
-        adj=None,
-        polys=None,
         py_ind: torch.Tensor | None = None,
-        contour_scale: torch.Tensor | None = None,
-        detail_feat: torch.Tensor | None = None,
-        x_self_cond: torch.Tensor | None = None,
-        locate_point_ctx: torch.Tensor | None = None,
-        locate_global_ctx: torch.Tensor | None = None,
-        locate_only: bool = False,
         s: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del adj, polys, contour_scale, detail_feat, x_self_cond
-        if locate_point_ctx is not None or locate_global_ctx is not None or locate_only:
-            raise ValueError("LocateToken conditioning is not part of the mainline")
         if x_t.ndim != 3 or x_t.shape[-1] != 2:
             raise ValueError(f"expected x_t [N,P,2], got {tuple(x_t.shape)}")
         if t.ndim != 1:
@@ -582,7 +568,6 @@ class MainlineFlowDenoiser(nn.Module):
         return collect_cr_moe_diagnostics(self)
 
     moe_diagnostics = cr_moe_diagnostics
-    ha_smoe_diagnostics = cr_moe_diagnostics
 
 
 __all__ = (

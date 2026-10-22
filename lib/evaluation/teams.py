@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TEAMS-style 2D metrics for DiffusionSnake semantic label masks.
+"""TEAMS-style 2D metrics for FlowContour semantic label masks.
 
 This module is an independent, dependency-light adaptation of the formulas in
 ``third_party/TEAMS/tools/test_medical.py``.  It does not import TEAMS because

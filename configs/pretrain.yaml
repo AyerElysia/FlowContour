@@ -1,0 +1,2 @@
+training_stage: pretrain
+model: flowcontour_pretrain

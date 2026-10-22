@@ -64,3 +64,15 @@ def require_idle_gpu(
         ):
             raise RuntimeError(f"GPU{int(gpu)} is not strictly idle: {samples}")
     return samples
+
+
+def acquire_gpu(gpu, allow_shared=False):
+    """Keep the strict formal gate; shared headroom is an explicit smoke-only choice."""
+    if not allow_shared:
+        return require_idle_gpu(gpu)
+    samples = [gpu_sample(gpu)]
+    time.sleep(15)
+    samples.append(gpu_sample(gpu))
+    if any(s["memory_mib"] > 30000 or s["util_percent"] > 50 for s in samples):
+        raise RuntimeError(f"GPU{gpu} lacks safe smoke headroom: {samples}")
+    return samples

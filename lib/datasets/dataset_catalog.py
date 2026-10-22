@@ -8,10 +8,10 @@ from pathlib import Path
 
 def _dataset_paths() -> tuple[str, str]:
     """Resolve data from environment variables, with repository-local defaults."""
-    root = Path(os.environ.get("DIFFUSIONSNAKE_DATA_ROOT", "data/verse_sagittal"))
+    root = Path(os.environ.get("FLOWCONTOUR_DATA_ROOT", "data/verse_sagittal"))
     manifest = Path(
         os.environ.get(
-            "DIFFUSIONSNAKE_SLICE_MANIFEST",
+            "FLOWCONTOUR_SLICE_MANIFEST",
             str(root / "manifests" / "slice_manifest.csv"),
         )
     )

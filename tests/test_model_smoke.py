@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @unittest.skipUnless(
-    os.environ.get("DIFFUSIONSNAKE_FULL_SMOKE") == "1",
-    "set DIFFUSIONSNAKE_FULL_SMOKE=1 for the CPU model smoke test",
+    os.environ.get("FLOWCONTOUR_FULL_SMOKE") == "1",
+    "set FLOWCONTOUR_FULL_SMOKE=1 for the CPU model smoke test",
 )
 class MainlineModelSmokeTest(unittest.TestCase):
     @classmethod
@@ -21,24 +21,19 @@ class MainlineModelSmokeTest(unittest.TestCase):
         sys.argv = [
             original_argv[0],
             "--cfg_file",
-            str(ROOT / "configs" / "stage1.yaml"),
+            str(ROOT / "configs" / "pretrain.yaml"),
         ]
         try:
             from lib.config import cfg
             from lib.networks import make_network
-            from lib.rl.fourier import outer_action_mean, stage_progress
-            from lib.train.trainers.diffusion_trainer import (
-                DiffusionPretrainNetworkWrapper,
-            )
+            from lib.train.wrapper import FlowContourNetworkWrapper
             from lib.utils.snake.snake_gcn_utils import img_poly_to_can_poly
         finally:
             sys.argv = original_argv
         cls.cfg = cfg
         cls.make_network = staticmethod(make_network)
-        cls.wrapper_type = DiffusionPretrainNetworkWrapper
+        cls.wrapper_type = FlowContourNetworkWrapper
         cls.canonicalize = staticmethod(img_poly_to_can_poly)
-        cls.outer_action_mean = staticmethod(outer_action_mean)
-        cls.stage_progress = staticmethod(stage_progress)
 
     @staticmethod
     def polygon(points, radius, center=64.0):
@@ -152,44 +147,22 @@ class MainlineModelSmokeTest(unittest.TestCase):
         initial = prediction["i_it_py"]
         owner = prediction["py_ind"]
 
-        def helper_displacement(fractions):
-            progress = self.stage_progress(fractions)
-            latents = [torch.randn_like(initial) for _ in fractions]
+        def helper_displacement():
             current = initial.clone()
             total = torch.zeros_like(initial)
-            for index, fraction in enumerate(fractions):
-                canonical = self.canonicalize(current)
-                action = self.outer_action_mean(
-                    network.gcn,
-                    feature,
-                    current,
-                    canonical,
-                    owner,
-                    fraction,
-                    4,
-                    progress[index],
-                    latents[index],
-                )
+            for index in range(2):
+                action = network.gcn.action_mean(feature, current, owner, index)
                 current = current + action
                 total = total + action
-            return total
+            return current - initial
 
-        for fractions in (
-            (0.6667, 1.0),
-            (0.2, 0.25, 0.3333, 0.5, 1.0),
-        ):
+        for _ in range(1):
             random_state = torch.get_rng_state()
-            production = network.gcn.sample_disp_iterative(
-                feature,
-                initial,
-                self.canonicalize(initial),
-                owner,
-                num_iter_steps=len(fractions),
-                fractions=fractions,
-                ode_steps=4,
-            )
+            with torch.no_grad():
+                production = network.gcn.rollout(feature, initial, owner)["disp"]
             torch.set_rng_state(random_state)
-            helper = helper_displacement(fractions)
+            with torch.no_grad():
+                helper = helper_displacement()
             self.assertLessEqual(
                 float((production - helper).abs().max().item()),
                 1e-5,

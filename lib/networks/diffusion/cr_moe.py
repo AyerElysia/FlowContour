@@ -245,7 +245,7 @@ def collect_cr_moe_diagnostics(module: nn.Module) -> dict[str, torch.Tensor]:
     if router is not None:
         for key, value in router.diagnostics().items():
             diagnostics[f"contour.{key}"] = value
-    routed_indices = getattr(module, "_cr_moe_layer_indices", getattr(module, "_ha_smoe_layer_indices", ()))
+    routed_indices = module._cr_moe_layer_indices
     layers = getattr(module, "dit_layers", ())
     for layer_index in routed_indices:
         experts = getattr(layers[layer_index], "routed_moe", None)
@@ -258,7 +258,6 @@ def collect_cr_moe_diagnostics(module: nn.Module) -> dict[str, torch.Tensor]:
 
 CRMoE = ContourSharedResidualExperts
 ContourRoutedMoE = ContourSharedResidualExperts
-collect_ha_smoe_diagnostics = collect_cr_moe_diagnostics
 
 __all__ = (
     "ContourRoutePath",
@@ -266,5 +265,4 @@ __all__ = (
     "CRMoE",
     "ContourRoutedMoE",
     "collect_cr_moe_diagnostics",
-    "collect_ha_smoe_diagnostics",
 )

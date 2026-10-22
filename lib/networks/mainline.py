@@ -40,19 +40,9 @@ class MoonViTFeatureReplacer(nn.Module):
         out_channels = int(out_channels)
         upscale = int(upscale)
         input_layers = int(input_layers)
-        if upscale < 1:
-            raise ValueError("upscale must be at least 1")
-        if hidden_channels % 16:
-            raise ValueError("hidden_channels must be divisible by 16")
-        if upscale > 1 and hidden_channels % (upscale * upscale):
-            raise ValueError("hidden_channels must be divisible by upscale squared")
-
+        if (in_channels, hidden_channels, out_channels, upscale, input_layers) != (1152, 512, 256, 2, 1):
+            raise ValueError("only the signed single-layer MoonViT replacer is supported")
         self.upscale = upscale
-        self.input_norm = None
-        if input_layers > 1:
-            if in_channels % input_layers:
-                raise ValueError("in_channels must be divisible by input_layers")
-            self.input_norm = nn.GroupNorm(input_layers, in_channels, affine=False)
 
         layers: list[nn.Module] = [
             nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=False),
@@ -68,47 +58,10 @@ class MoonViTFeatureReplacer(nn.Module):
             nn.GroupNorm(16, hidden_channels),
             nn.GELU(),
         ]
-        if upscale <= 2:
-            if upscale > 1:
-                layers.append(nn.PixelShuffle(upscale))
-                head_channels = hidden_channels // (upscale * upscale)
-            else:
-                head_channels = hidden_channels
-            layers.append(
-                nn.Conv2d(
-                    head_channels,
-                    out_channels,
-                    kernel_size=3,
-                    padding=1,
-                    bias=True,
-                )
-            )
-        else:
-            layers.extend(
-                [
-                    nn.Conv2d(
-                        hidden_channels,
-                        out_channels * upscale * upscale,
-                        kernel_size=1,
-                        bias=False,
-                    ),
-                    nn.PixelShuffle(upscale),
-                    nn.GroupNorm(16, out_channels),
-                    nn.GELU(),
-                    nn.Conv2d(
-                        out_channels,
-                        out_channels,
-                        kernel_size=3,
-                        padding=1,
-                        bias=True,
-                    ),
-                ]
-            )
+        layers.extend([nn.PixelShuffle(2), nn.Conv2d(128, 256, 3, padding=1)])
         self.proj = nn.Sequential(*layers)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        if self.input_norm is not None:
-            features = self.input_norm(features)
         return self.proj(features)
 
 
@@ -126,8 +79,8 @@ class Network(nn.Module):
                 "The mainline package only supports detector_backend='flow_box_only'; "
                 f"got {self.detector_backend!r}."
             )
-        if not bool(cfg.use_gt_det):
-            raise ValueError("flow_box_only requires use_gt_det=true")
+        if not bool(cfg.use_gt_det) or bool(cfg.use_gt_det_train_only):
+            raise ValueError("the oracle mainline requires GT prompts for both training and inference")
         if not bool(cfg.locate_feat_replace) or bool(cfg.locate_feat_inject):
             raise ValueError(
                 "The mainline requires locate_feat_replace=true and "
@@ -153,7 +106,6 @@ class Network(nn.Module):
         from lib.networks.diffusion import FlowMatchingEvolution
 
         self.gcn = FlowMatchingEvolution()
-        self.diffusion_loss_fn = None
 
         replacer_parameters = sum(
             parameter.numel() for parameter in self.locate_feat_replacer.parameters()
@@ -162,17 +114,6 @@ class Network(nn.Module):
             "[Mainline] backend=flow_box_only MoonViT=layer_18 "
             f"replacer={replacer_parameters:,} Flow={sum(p.numel() for p in self.gcn.parameters()):,}",
             flush=True,
-        )
-
-    @staticmethod
-    def should_use_gt_detection(
-        use_gt_det: bool,
-        train_only: bool,
-        is_training: bool,
-        batch: dict | None,
-    ) -> bool:
-        return bool(use_gt_det) and batch is not None and (
-            bool(is_training) or not bool(train_only)
         )
 
     @staticmethod
@@ -408,52 +349,11 @@ class Network(nn.Module):
                 (boxes, scores, classes), dim=1
             )
 
-    def _apply_external_detection(self, output: dict, batch: dict) -> None:
-        detection = batch.get("external_detection")
-        if detection is None:
-            return
-        if self.training:
-            raise RuntimeError("external detections are evaluation-only")
-        if self.should_use_gt_detection(
-            cfg.use_gt_det, cfg.use_gt_det_train_only, self.training, batch
-        ):
-            raise ValueError("GT and external detections are mutually exclusive")
-        detection = torch.as_tensor(
-            detection, device=batch["inp"].device, dtype=batch["inp"].dtype
-        )
-        if detection.ndim != 3 or detection.shape[-1] != 6:
-            raise ValueError("external_detection must have shape [B,N,6]")
-        if detection.shape[0] != batch["inp"].shape[0]:
-            raise ValueError("external_detection batch dimension mismatch")
-        if not torch.isfinite(detection).all():
-            raise ValueError("external_detection contains non-finite values")
-        valid = detection[..., 4] > 1e-4
-        if (~valid).any() and not torch.all(detection[~valid] == 0):
-            raise ValueError("external_detection padding rows must be zero")
-        if valid.any():
-            rows = detection[valid]
-            if not torch.all(rows[:, 2] > rows[:, 0]) or not torch.all(
-                rows[:, 3] > rows[:, 1]
-            ):
-                raise ValueError("external boxes must have positive area")
-            classes = rows[:, 5]
-            if not torch.all(classes == classes.round()) or not torch.all(
-                (classes >= 0) & (classes <= 24)
-            ):
-                raise ValueError("external class IDs must be integers in [0,24]")
-        output["detection"] = detection
-        output["ct"] = (
-            (detection[..., :2] + detection[..., 2:4]) * 0.5
-            if detection.shape[1]
-            else detection.new_zeros((detection.shape[0], 0, 2))
-        )
-        output["external_detection_source"] = batch.get(
-            "external_detection_source", "external"
-        )
-
-    def forward(self, image: torch.Tensor, batch: dict | None = None) -> dict:
+    def encode_batch(self, image: torch.Tensor, batch: dict | None = None) -> dict:
         if batch is None:
             raise ValueError("the mainline forward pass requires a batch dictionary")
+        if batch.get("external_detection") is not None:
+            raise ValueError("external detections are outside the oracle mainline")
         stride = max(int(round(self.down_ratio)), 1)
         feature_h = (int(image.shape[-2]) + stride - 1) // stride
         feature_w = (int(image.shape[-1]) + stride - 1) // stride
@@ -475,11 +375,14 @@ class Network(nn.Module):
             "cnn_feature": features,
             **feature_stats,
         }
-        if self.should_use_gt_detection(
-            cfg.use_gt_det, cfg.use_gt_det_train_only, self.training, batch
-        ):
-            self._use_gt_detection(output, batch)
-        self._apply_external_detection(output, batch)
+        self._use_gt_detection(output, batch)
+        return output
+
+    def forward(self, image: torch.Tensor, batch: dict | None = None) -> dict:
+        output = self.encode_batch(image, batch)
+        features = output["cnn_feature"]
+        feature_h, feature_w = output["feat_hw"]
+        feature_stats = {key: value for key, value in output.items() if key.startswith("locate_")}
 
         detection_context = {
             key: output[key] for key in ("ct", "detection")

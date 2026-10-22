@@ -18,7 +18,6 @@ import pathlib
 import random
 import sys
 import time
-from contextlib import nullcontext
 
 import cv2
 import numpy as np
@@ -29,7 +28,7 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.runtime import require_idle_gpu
+from lib.runtime.gpu import acquire_gpu
 
 
 DEV8_CASES = (
@@ -51,7 +50,7 @@ def parse_args(argv=None):
     project_root = PROJECT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=str(project_root))
-    parser.add_argument("--config", default=str(project_root / "configs/stage1.yaml"))
+    parser.add_argument("--config", default=str(project_root / "configs/pretrain.yaml"))
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--result-dir", required=True)
     parser.add_argument("--data-root", required=True)
@@ -87,20 +86,12 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260731)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--allow-shared-gpu", action="store_true")
     parser.add_argument(
         "--gpu",
         type=int,
         required=True,
         help="physical GPU; it must pass two strict idle samples 15 seconds apart",
-    )
-    parser.add_argument(
-        "--max-idle-memory-mib",
-        type=int,
-        default=20,
-        help=(
-            "maximum driver-resident memory allowed by the two-sample GPU "
-            "idle gate; the resolved threshold is recorded in result provenance"
-        ),
     )
     parser.add_argument(
         "--smoke-slices",
@@ -184,7 +175,10 @@ def move_batch(batch, device):
 def strict_load(wrapper, checkpoint_path):
     from lib.checkpoints import extract_state_dict, normalize_state_dict
 
-    checkpoint = torch.load(os.fspath(checkpoint_path), map_location="cpu")
+    checkpoint = torch.load(os.fspath(checkpoint_path), map_location="cpu", weights_only=False)
+    from lib.protocol import protocol_metadata
+    if checkpoint.get("protocol") != protocol_metadata():
+        raise RuntimeError("checkpoint is not the full2.v2 inference protocol")
     normalized = normalize_state_dict(extract_state_dict(checkpoint))
     target = wrapper.state_dict()
     missing = sorted(set(target).difference(normalized))
@@ -427,19 +421,18 @@ def main(argv=None):
         raise FileNotFoundError("TEAMS upstream root missing: {}".format(teams_upstream_root))
     if result_dir.exists():
         raise FileExistsError("result directory must be fresh: {}".format(result_dir))
-    gpu_checks = require_idle_gpu(
-        args.gpu,
-        max_memory_mib=int(args.max_idle_memory_mib),
-    )
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(int(args.gpu))
+    if args.allow_shared_gpu and args.smoke_slices <= 0:
+        raise ValueError("shared resource exception is restricted to nonreportable smoke inference")
+    gpu_checks = acquire_gpu(args.gpu, args.allow_shared_gpu) if args.device == "cuda" else []
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(int(args.gpu)) if args.device == "cuda" else ""
     result_dir.mkdir(parents=True)
 
     os.chdir(os.fspath(project_root))
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     os.environ["CFG_FILE"] = os.fspath(config_path)
-    os.environ["DIFFUSIONSNAKE_DATA_ROOT"] = os.fspath(data_root)
-    os.environ["DIFFUSIONSNAKE_SLICE_MANIFEST"] = os.fspath(slice_manifest)
+    os.environ["FLOWCONTOUR_DATA_ROOT"] = os.fspath(data_root)
+    os.environ["FLOWCONTOUR_SLICE_MANIFEST"] = os.fspath(slice_manifest)
     sys.argv = [sys.argv[0], "--cfg_file", os.fspath(config_path)]
 
     from lib.config import cfg
@@ -452,12 +445,12 @@ def main(argv=None):
         inverse_affine_points,
     )
     from lib.networks import make_network
-    from lib.train.trainers.make_trainer import _wrapper_factory
+    from lib.train.wrapper import FlowContourNetworkWrapper
+    from lib.protocol import protocol_metadata
     from lib.utils.snake import snake_config
     from lib.utils.snake.snake_voc_utils import get_octagon, get_quadrangle
 
     cfg.use_gdpo = False
-    cfg.use_grpo = False
     cfg.use_gt_det = True
     cfg.use_gt_det_train_only = False
     cfg.sagittal_eval_box_mode = "gt"
@@ -475,9 +468,6 @@ def main(argv=None):
     cfg.image_lr_flip = False
     cfg.image_random_crop = False
     cfg.flow_ode_steps = 4
-    cfg.iterative_num_steps = 2
-    cfg.iterative_fractions = [0.6667, 1.0]
-    cfg.iterative_ode_steps = 4
     cfg.flow_ode_solver = "ab2"
 
     attrs = DatasetCatalog.get("VolMemDev8")
@@ -515,12 +505,14 @@ def main(argv=None):
         persistent_workers=bool(args.num_workers > 0),
     )
 
-    if args.device != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("this inference requires an available CUDA device")
-    device = torch.device("cuda")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable")
+    if args.device == "cpu" and args.smoke_slices <= 0:
+        raise RuntimeError("CPU mode is a nonreportable functional smoke only")
+    device = torch.device(args.device)
     seed_all(args.seed)
     base_network = make_network(cfg)
-    wrapper = _wrapper_factory(cfg, base_network)
+    wrapper = FlowContourNetworkWrapper(base_network)
     parameter_count = int(sum(parameter.numel() for parameter in wrapper.parameters()))
     if parameter_count != int(args.expected_parameters):
         raise RuntimeError(
@@ -532,6 +524,8 @@ def main(argv=None):
         raise RuntimeError("mainline unexpectedly constructed a CNN context module")
     checkpoint, loaded_tensor_count = strict_load(wrapper, checkpoint_path)
     checkpoint_step = int(checkpoint.get("step", -1))
+    if not smoke_mode and checkpoint.get("run_mode") != "train":
+        raise RuntimeError("functional-smoke weights cannot produce a reportable full evaluation")
     wrapper = wrapper.to(device).eval()
     memory_parameter_count = int(sum(
         parameter.numel() for name, parameter in wrapper.named_parameters()
@@ -551,10 +545,6 @@ def main(argv=None):
             result_dir / "teams_style_2d",
             upstream_root=teams_upstream_root,
         )
-    amp_context = (
-        lambda: torch.cuda.amp.autocast(dtype=torch.float16)
-        if bool(cfg.use_amp) else nullcontext()
-    )
 
     start = time.perf_counter()
     processed = 0
@@ -562,8 +552,7 @@ def main(argv=None):
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
             batch = move_batch(batch, device)
-            with amp_context():
-                output = wrapper.net(batch["inp"], batch)
+            output = wrapper.net(batch["inp"], batch)
             masks = prediction_masks(
                 output, batch, evaluator, inverse_affine_points, snake_config
             )
@@ -592,7 +581,8 @@ def main(argv=None):
                     flush=True,
                 )
             del output, batch, masks
-    torch.cuda.synchronize(device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - start
     if processed != expected_processed:
         raise RuntimeError("processed slice count drift")
@@ -673,8 +663,9 @@ def main(argv=None):
                 str(teams_upstream_root) if teams_upstream_root is not None else None
             ),
             "seed": int(args.seed),
-            "physical_gpu": int(args.gpu),
-            "gpu_idle_max_memory_mib": int(args.max_idle_memory_mib),
+            "physical_gpu": int(args.gpu) if args.device == "cuda" else None,
+            "gpu_resource_gate": "shared_smoke_headroom" if args.allow_shared_gpu else "strict_idle",
+            "gpu_memory_cap_mib": 30000 if args.allow_shared_gpu else 20,
             "gpu_idle_checks": gpu_checks,
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         },
@@ -699,6 +690,8 @@ def main(argv=None):
             },
         },
         "inference": {
+            "protocol": protocol_metadata(),
+            "exploration_enabled": False,
             "box_source": "GT axis-aligned rectangle",
             "initialization": "Route B rectangle -> 12-point octagon -> 128-point uniform contour",
             "class_source": "GT oracle",
