@@ -1,0 +1,138 @@
+# RAOS YOLO26 + CR-MoE；监督课程与有效的 RAOS ordered 版本保持一致。
+task: snake
+model: flowcontour_cr_moe
+training_stage: pretrain
+gpus: [0]
+# YOLO26 特征融合器 + CR-MoE Flow 的参数量检查。
+pure2d_expected_parameter_count: 18855984
+pure2d_memory_free_required: true
+pure2d_internal_detector_free_required: true
+# oracle 主线：GT box / class，没有内部检测器。
+detector_backend: flow_box_only
+use_gt_det: true
+use_gt_det_train_only: false
+gt_detection_class_offset: 1
+anatomical_class_count: 19
+image_random_crop: false
+image_color_aug: false
+image_lr_flip: false
+raos_image_encoder: yolo26
+yolo26_pretrained_path: weights/best.pt
+yolo26_pyramid_channels: 128
+# 闭合轮廓离散点数；必须与 lib/protocol.py CONTOUR_POINTS 一致。
+poly_num: 128
+gt_poly_num: 128
+# 该接口名称保留于网络封装；实际使用冻结 YOLO26 P2/P3 与可训练 FPN。
+locate_feat_replace: true
+locate_feat_inject: false
+locate_feat_keys: [layer_18]
+locate_feat_dim: 1152
+locate_feat_input_layers: 1
+locate_feat_fusion_mode: center_only
+sagittal_moonvit_fusion_mode: center_only
+sagittal_moonvit_feature_key: layer_18
+locate_feat_replace_hidden_dim: 512
+locate_feat_replace_out_channels: 256
+locate_feat_replace_upscale: 2
+locate_feat_resample_padding_mode: border
+snake_feature_dim: 256
+gcn_sample_mode: half_pixel
+gcn_sample_padding_mode: border
+sagittal_component_mode: significant
+sagittal_max_components_per_class: 4
+sagittal_min_component_area_raw: 2.0
+sagittal_max_instances_per_slice: 32
+min_poly_area_output: 0.5
+# 使用 RAOS manifest 的 train/validation/test 病例划分。
+sagittal_train_exclude_case_ids: []
+sagittal_eval_include_case_ids: []
+sagittal_forbidden_case_ids: []
+sagittal_expected_train_case_count: 220
+sagittal_expected_train_row_count: 8683
+sagittal_expected_eval_case_count: 0
+sagittal_expected_eval_row_count: 0
+use_diffusion_evolution: true
+use_flow_matching: true
+use_gdpo: false
+# 阶段条件 s 为连续累计完成进度；部署使用 0 与 0.6667。
+flow_2d_s_conditioning: true
+v3_7_use_contour_norm: true
+class_aware_flow_conditioning: true
+v4_1_use_detail_context: true
+v4_1_detail_context_mode: normal_tangent
+yolo_local_detail_offsets: true
+v4_1_use_curvature_reweight: true
+yolo_curvature_turning_angle: true
+v3_7_endpoint_loss_weight: 1.0
+v4_3_chamfer_loss_weight: 1.0
+v4_3_chamfer_tau: 0.05
+# 必须与 protocol.ODE_STEPS / solver=ab2 一致：每步 4 次真 AB2，两步共 8 NFE。
+flow_ode_steps: 4
+flow_ode_solver: ab2
+flow_train_noise_scale: 1.0
+infer_noise_scale: 1.0
+infer_avg_samples: 1
+diffusion_disp_norm: false
+diffusion_disp_stats: data/stats/volmem_sagittal_disp_stats.json
+dit_num_layers: 6
+dit_num_heads: 8
+dit_state_dim: 256
+# Route-B：GT box → octagon 初始轮廓。
+diffusion_init_source: bbox_octagon
+contour_init_method: octagon
+routeb_box_jitter_enabled: true
+routeb_box_jitter_probabilities: [0.35, 0.40, 0.20, 0.05]
+routeb_box_jitter_shift_fractions: [0.0, 0.05, 0.10, 0.15]
+routeb_box_jitter_log_scale_fractions: [0.0, 0.10, 0.20, 0.30]
+routeb_box_jitter_edge_fractions: [0.0, 0.03, 0.08, 0.15]
+routeb_box_jitter_min_iou: 0.20
+# 与原 RAOS 有效版本一致的连续课程；前三类参数仅保留旧接口兼容。
+v4_10_use_continuous_sampling: true
+v4_10_sigma: 0.05
+v4_10_uniform_bg_prob: 0.15
+v4_10_uniform_blend_lambda: 0.3
+v4_10_centers: [0.0, 0.3333, 0.5, 0.8, 0.97]
+v4_10_center_weights: [0.2933, 0.1767, 0.27, 0.179, 0.081]
+train_state_probabilities: [0.5, 0.2, 0.3]
+# Fourier coefficient std in network input pixels (not per-point RMS).
+refine_sigma_px: 3.0
+refine_modes: 8
+train:
+    dataset: RAOSTrain
+    lr: 0.00005
+    batch_size: 1
+    num_workers: 0
+    max_ct_num: 8
+    # 以有效更新数为唯一停止上限。
+    max_steps: 60000
+    warmup_steps: 1000
+    weight_decay: 0.0001
+    gradient_clip: 1.0
+    step_checkpoint_every: 1000
+    boundary_weight: 0.5
+    geometry_weight: 1.0
+    rollout_boundary_weight: 0.25
+    rollout_geometry_weight: 0.5
+    geometry_warmup_steps: 1000
+    rollout_every: 4
+test:
+    dataset: RAOSVal
+    batch_size: 1
+gdpo:
+    k: 8
+    modes: 8
+    # 两步几何扰动标准差，单位是网络输入像素；采样时再 /4 到特征网格。
+    sigma_px: [1.2, 0.8]
+    # [0,1]：第二步允许 1 个局部 bump 候选；[0,0] 是纯低频对照。
+    local_quota: [0, 1]
+    ppo_epochs: 2
+    clip: 0.05
+    approx_kl_stop: 0.002
+    kl_beta: 0.01
+    adv_std_floor: 0.1
+    adv_clip: 2.0
+    max_contours: 4
+    grad_clip: 0.25
+    min_baseline_iou: 0.45
+    min_baseline_dice: 0.60
+    eval_every: 1000

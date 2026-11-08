@@ -1,0 +1,12 @@
+# GDPO 几何探索强化学习：只覆盖阶段差异。轨迹仍是两步完整位移，与部署一致。
+# 禁止走监督 FM forward；奖励是终点多尺度 NSD，信用是最终优势 × 阶段质量。
+training_stage: gdpo
+model: flowcontour_gdpo
+use_gdpo: true
+train:
+    lr: 0.00000004
+    batch_size: 1
+    num_workers: 0
+    max_steps: 3000
+    warmup_steps: 0
+    step_checkpoint_every: 100

@@ -1,56 +1,44 @@
-# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
-.coverage
-htmlcov/
-
-# Local environments and editors
+.ruff_cache/
 .venv/
 venv/
-.idea/
-.vscode/
 .env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.pid
 
-# Build artifacts
-build/
-dist/
-*.egg-info/
-*.so
-
-# Model weights and experiment outputs
+# This is a code-only publication.
+data/
+weights/
+outputs/
+runs/
+reports/
 *.pt
 *.pth
-*.pth.tar
 *.ckpt
-*.bin
 *.safetensors
-/artifacts/checkpoints/
-/data/outputs/
-/data/records/
-/data/results/
-/logs/
-/wandb/
-/tensorboard/
-/visual/
-/results/
-/test_results/
-/vis/
-nohup*.out
-
-# Local VerSe images, masks, and MoonViT cache
-/data/verse_sagittal/
-/data/sagittal_moonvit_cache/
-
-# Keep the small released statistics file under data/.
-!/data/
-/data/*
-!/data/stats/
-/data/stats/*
-!/data/stats/volmem_sagittal_disp_stats.json
-
-# OS files
-.DS_Store
-Thumbs.db
-/docs/
+*.onnx
+*.bin
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+*.gif
+*.dcm
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.csv
+!*.example.csv

@@ -1,0 +1,25 @@
+path: ../data/yolo_test
+train: images/train
+val: images/val
+test: images/test
+nc: 19
+names:
+  0: Liver
+  1: Spleen
+  2: left kidney
+  3: right kidney
+  4: Stomach
+  5: Gallbladder
+  6: Esophagus
+  7: Pancreas
+  8: Duodenum
+  9: Colon
+  10: Intestine
+  11: left adrenal
+  12: right adrenal
+  13: Rectum
+  14: Bladder
+  15: left head of femur
+  16: right head of femur
+  17: Prostate
+  18: Seminal vesicles

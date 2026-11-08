@@ -1,0 +1,3 @@
+# 连续状态监督预训练，训练 Flow/CR-MoE 与 YOLO26 FPN，冻结 YOLO26 骨干。
+training_stage: pretrain
+model: flowcontour_pretrain
